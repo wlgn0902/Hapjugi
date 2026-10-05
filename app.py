@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 from html import escape as html_escape
 import json
 import secrets
@@ -21,6 +22,7 @@ ROOM_FIELDS = [
     "room_code",
     "room_name",
     "host_name",
+    "password_hash",
     "start_date",
     "end_date",
     "unavailable_windows",
@@ -196,6 +198,94 @@ def make_room_code(existing_codes: set[str]) -> str:
     raise RuntimeError("사용할 수 있는 방 코드를 만들지 못했습니다. 다시 시도해 주세요.")
 
 
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def room_password_enabled(room: dict[str, str]) -> bool:
+    return bool(room.get("password_hash", "").strip())
+
+
+def verify_room_password(room: dict[str, str], password: str) -> bool:
+    saved = room.get("password_hash", "").strip()
+    if not saved:
+        return True
+    return secrets.compare_digest(saved, hash_password(password))
+
+
+def set_room_session(room_code: str, member_name: str) -> None:
+    st.session_state["room_code"] = room_code
+    st.session_state["member_name"] = member_name
+    st.query_params["room"] = room_code
+    st.query_params["member"] = member_name
+
+
+def clear_room_session() -> None:
+    st.session_state.pop("room_code", None)
+    st.session_state.pop("member_name", None)
+    for key in ("room", "member"):
+        st.query_params.pop(key, None)
+
+
+def restore_room_from_query() -> None:
+    if st.session_state.get("room_code") and st.session_state.get("member_name"):
+        return
+    room_code = st.query_params.get("room", "").strip()
+    member_name = st.query_params.get("member", "").strip()
+    if not room_code or not member_name:
+        return
+    room = get_room(room_code)
+    if not room:
+        return
+    if not any(member["name"] == member_name for member in room_members(room_code)):
+        return
+    if room_password_enabled(room):
+        return
+    set_room_session(room_code, member_name)
+
+
+def apply_paint_ranges_from_query() -> None:
+    payload = st.query_params.get("paint", "").strip()
+    if not payload:
+        return
+    room_code = st.query_params.get("room", "").strip()
+    member_name = st.query_params.get("member", "").strip()
+    status = st.query_params.get("status", "").strip()
+    if not room_code or not member_name or status not in [*STATUS_OPTIONS, CLEAR_STATUS]:
+        st.query_params.pop("paint", None)
+        return
+    room = get_room(room_code)
+    if not room or not any(member["name"] == member_name for member in room_members(room_code)):
+        st.query_params.pop("paint", None)
+        return
+    windows = get_windows(room)
+    changed = 0
+    try:
+        for group in payload.split(";"):
+            if not group or ":" not in group or "-" not in group:
+                continue
+            day_string, range_part = group.split(":", 1)
+            start_text, end_text = range_part.split("-", 1)
+            selected_day = date.fromisoformat(day_string)
+            start_minute = int(start_text)
+            end_minute = int(end_text)
+            for minute in range(start_minute, end_minute + 1, 15):
+                if not (0 <= minute < 1440) or is_unavailable(minute_to_time(minute), windows):
+                    continue
+                if status == CLEAR_STATUS:
+                    clear_availability_slot(room_code, member_name, selected_day, minute)
+                else:
+                    save_availability(room_code, member_name, selected_day, minute, minute + 15, status)
+                changed += 1
+    except (ValueError, TypeError):
+        st.session_state["schedule_grid_notice"] = ("error", "드래그 입력을 처리하지 못했습니다. 다시 시도해 주세요.")
+    else:
+        if changed:
+            st.session_state["schedule_grid_notice"] = ("success", f"{changed}개의 15분 칸을 변경했습니다.")
+    for key in ("paint", "status"):
+        st.query_params.pop(key, None)
+
+
 def minute_to_time(minute: int) -> str:
     return f"{minute // 60:02d}:{minute % 60:02d}"
 
@@ -299,6 +389,15 @@ def show_room_creation() -> None:
     with st.form("create_room_form"):
         room_name = st.text_input("방 이름", placeholder="예: 토요일 밴드 합주")
         host_name = st.text_input("만든 사람 이름", placeholder="예: 민지")
+        password_enabled = st.checkbox("방 비밀번호 설정", value=False)
+        room_password = st.text_input(
+            "방 비밀번호",
+            type="password",
+            max_chars=50,
+            placeholder="비밀번호를 입력하세요",
+            disabled=not password_enabled,
+            help="설정하면 방 코드와 비밀번호를 모두 알아야 참여할 수 있습니다.",
+        )
         date_col1, date_col2 = st.columns(2)
         start_date = date_col1.date_input("합주 시작일", value=date.today(), key="new_room_start")
         end_date = date_col2.date_input(
@@ -331,6 +430,9 @@ def show_room_creation() -> None:
         if not room_name or not host_name:
             st.error("방 이름과 만든 사람 이름을 모두 입력해 주세요.")
             return
+        if password_enabled and len(room_password) < 4:
+            st.error("방 비밀번호는 4자 이상으로 설정해 주세요.")
+            return
         if end_date < start_date:
             st.error("종료일은 시작일보다 빠를 수 없습니다.")
             return
@@ -353,6 +455,7 @@ def show_room_creation() -> None:
                 "room_code": code,
                 "room_name": room_name,
                 "host_name": host_name,
+                "password_hash": hash_password(room_password) if password_enabled else "",
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "unavailable_windows": json.dumps(windows, ensure_ascii=False),
@@ -360,8 +463,7 @@ def show_room_creation() -> None:
             }
             save_room(room)
             save_member(code, host_name, "방장")
-            st.session_state["room_code"] = code
-            st.session_state["member_name"] = host_name
+            set_room_session(code, host_name)
             st.success(f"방을 만들었습니다. 방 코드: **{code}**")
             st.rerun()
         except RuntimeError as error:
@@ -373,6 +475,7 @@ def show_join_room() -> None:
     with st.form("join_room_form"):
         code = st.text_input("6자리 방 코드", max_chars=6, placeholder="예: 038517")
         member_name = st.text_input("내 이름", placeholder="예: 지훈")
+        room_password = st.text_input("방 비밀번호", type="password", placeholder="비밀번호가 설정된 방만 입력")
         submitted = st.form_submit_button("방 참여", type="primary", use_container_width=True)
     if submitted:
         normalized_code = code.strip()
@@ -387,9 +490,11 @@ def show_join_room() -> None:
         if not room:
             st.error("해당 코드의 방을 찾을 수 없습니다.")
             return
+        if not verify_room_password(room, room_password):
+            st.error("방 비밀번호가 맞지 않습니다.")
+            return
         save_member(normalized_code, member_name)
-        st.session_state["room_code"] = normalized_code
-        st.session_state["member_name"] = member_name
+        set_room_session(normalized_code, member_name)
         st.success(f"'{room['room_name']}' 방에 참여했습니다.")
         st.rerun()
 
@@ -430,106 +535,142 @@ def render_editable_schedule_grid(
     statuses: dict[tuple[str, str], str],
     selected_status: str,
 ) -> None:
+    """HTML/JS grid: click or drag over cells, then send compact ranges back via query params."""
+    import streamlit.components.v1 as components
+
     weekday_names = "월화수목금토일"
-    columns_spec = [0.85, *([1.0] * len(dates))]
-    header_columns = st.columns(columns_spec, gap="small", vertical_alignment="center")
-    header_columns[0].markdown("**시간**")
-    for column, selected_date in zip(header_columns[1:], dates):
-        column.markdown(
-            f"**{selected_date:%m/%d}**<br>{weekday_names[selected_date.weekday()]}",
-            unsafe_allow_html=True,
-        )
-
-    style_rules = "".join(
-        f'div[class*="st-key-schedule_cell_style_{STATUS_CLASSES[status].replace("-", "_")}_"] button '
-        f'{{ background-color: {color} !important; border-color: #4b5563 !important; }}'
-        for status, color in STATUS_COLORS.items()
+    date_json = json.dumps([d.isoformat() for d in dates], ensure_ascii=False)
+    minute_json = json.dumps(minutes)
+    blocked_json = json.dumps(
+        {d.isoformat(): [m for m in minutes if is_unavailable(minute_to_time(m), windows)] for d in dates}
     )
-    st.markdown(
-        f"""
-        <style>
-          div[class*="st-key-schedule_cell_style_"] {{
-            padding: 0 !important; margin: 0 !important;
-          }}
-          div[class*="st-key-schedule_cell_style_"] button {{
-            width: 100%; height: 20px; min-height: 20px !important;
-            padding: 0 !important; border-radius: 0 !important;
-            border: 1px solid #6b7280 !important; line-height: 1 !important;
-          }}
-          {style_rules}
-          div[class*="st-key-schedule_cell_style_empty_"] button {{
-            background-color: #fff !important;
-          }}
-          div[class*="st-key-schedule_cell_style_blocked_"] button {{
-            background-color: #374151 !important; color: #fff !important;
-            opacity: 1 !important; cursor: not-allowed !important;
-          }}
-          div[class*="st-key-schedule_cell_style_"] button p {{ margin: 0; }}
-          div[class*="st-key-schedule_cell_style_"] button:hover:not(:disabled) {{
-            filter: brightness(0.92);
-          }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    status_json = json.dumps(
+        {f"{d.isoformat()}|{minute}": statuses.get((d.isoformat(), minute_to_time(minute)), "") for d in dates for minute in minutes},
+        ensure_ascii=False,
     )
+    colors_json = json.dumps(STATUS_COLORS, ensure_ascii=False)
+    selected_json = json.dumps(selected_status, ensure_ascii=False)
+    room_code_json = json.dumps(room["room_code"])
+    member_json = json.dumps(member_name, ensure_ascii=False)
+    clear_json = json.dumps(CLEAR_STATUS, ensure_ascii=False)
 
+    rows_html = []
     for minute in minutes:
-        row_columns = st.columns(
-            columns_spec, gap="small", vertical_alignment="center"
+        cells = [f'<div class="time-cell">{html_escape(format_hour_label(minute) or "")}</div>']
+        for selected_date in dates:
+            key = f"{selected_date.isoformat()}|{minute}"
+            status = statuses.get((selected_date.isoformat(), minute_to_time(minute)), "")
+            blocked = is_unavailable(minute_to_time(minute), windows)
+            color = STATUS_COLORS.get(status, "#ffffff") if not blocked else "#374151"
+            cells.append(
+                f'<div class="slot {"blocked" if blocked else ""}" data-date="{selected_date.isoformat()}" '
+                f'data-minute="{minute}" style="background:{color};"></div>'
+            )
+        rows_html.append(f'<div class="grid-row">{"".join(cells)}</div>')
+
+    headers = ['<div class="header-cell time-header">시간</div>']
+    for selected_date in dates:
+        headers.append(
+            f'<div class="header-cell">{selected_date:%m/%d}<small>{weekday_names[selected_date.weekday()]}</small></div>'
         )
-        row_columns[0].markdown(format_hour_label(minute) or "&nbsp;", unsafe_allow_html=True)
-        slot_time = minute_to_time(minute)
-        for column, selected_date in zip(row_columns[1:], dates):
-            date_key = selected_date.isoformat()
-            cell_key = (date_key, slot_time)
-            status = statuses.get(cell_key, "")
-            blocked = is_unavailable(slot_time, windows)
-            style_token = (
-                "blocked"
-                if blocked
-                else STATUS_CLASSES.get(status, "empty").replace("-", "_")
-            )
-            slot_suffix = f"{room['room_code']}_{selected_date:%Y%m%d}_{minute}"
-            button_key = f"schedule_cell_{slot_suffix}"
-            help_text = (
-                f"{selected_date:%m/%d} {slot_time} · "
-                f"{'합주 금지' if blocked else status or '미입력'}"
-            )
-            marker = STATUS_MARKERS.get(status, " ") if not blocked else " "
-            with column.container(key=f"schedule_cell_style_{style_token}_{slot_suffix}"):
-                clicked = st.button(
-                    marker,
-                    key=button_key,
-                    help=help_text,
-                    disabled=blocked,
-                    use_container_width=True,
-                )
-            if clicked:
-                try:
-                    if selected_status == CLEAR_STATUS:
-                        clear_availability_slot(
-                            room["room_code"], member_name, selected_date, minute
-                        )
-                        notice = (
-                            f"{selected_date:%m/%d} {slot_time} 입력을 지웠습니다."
-                        )
-                    else:
-                        save_availability(
-                            room["room_code"],
-                            member_name,
-                            selected_date,
-                            minute,
-                            minute + 15,
-                            selected_status,
-                        )
-                        notice = (
-                            f"{selected_date:%m/%d} {slot_time}에 "
-                            f"'{selected_status}'을 입력했습니다."
-                        )
-                    st.session_state["schedule_grid_notice"] = ("success", notice)
-                except RuntimeError as error:
-                    st.session_state["schedule_grid_notice"] = ("error", str(error))
-                st.rerun()
+
+    html = f"""
+    <style>
+      * {{ box-sizing: border-box; }}
+      body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+      .toolbar {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; align-items:center; }}
+      .hint {{ font-size:12px; color:#64748b; margin-bottom:8px; }}
+      .wrap {{ overflow:auto; max-width:100%; border:1px solid #cbd5e1; border-radius:8px; }}
+      .grid {{ min-width: 520px; user-select:none; touch-action:none; }}
+      .grid-row, .grid-header {{ display:grid; grid-template-columns:72px repeat({len(dates)}, minmax(62px, 1fr)); }}
+      .header-cell {{ position:sticky; top:0; z-index:3; background:#f8fafc; border-right:1px solid #cbd5e1; border-bottom:1px solid #94a3b8; text-align:center; padding:5px 2px; font-weight:700; font-size:12px; }}
+      .header-cell small {{ display:block; font-weight:500; color:#64748b; }}
+      .time-cell {{ background:#f8fafc; border-right:1px solid #cbd5e1; border-bottom:1px solid #cbd5e1; height:18px; line-height:18px; font-size:10px; text-align:right; padding-right:5px; white-space:nowrap; }}
+      .slot {{ height:18px; border-right:1px solid #d1d5db; border-bottom:1px solid #d1d5db; cursor:crosshair; }}
+      .slot:hover {{ outline:2px solid #111827; outline-offset:-2px; position:relative; z-index:2; }}
+      .slot.blocked {{ cursor:not-allowed; opacity:1; }}
+      .slot.drag-selected {{ outline:2px solid #111827; outline-offset:-2px; filter:brightness(.92); }}
+      .status-button {{ border:1px solid #94a3b8; background:#fff; border-radius:7px; padding:6px 9px; font-size:12px; cursor:pointer; }}
+      .status-button.active {{ border:2px solid #111827; font-weight:700; }}
+      .apply-button {{ border:0; background:#111827; color:white; border-radius:7px; padding:7px 12px; font-size:12px; cursor:pointer; }}
+      @media (max-width:700px) {{ .grid-row, .grid-header {{ grid-template-columns:62px repeat({len(dates)}, minmax(56px, 1fr)); }} .slot,.time-cell {{height:17px}} .status-button {{padding:6px 7px}} }}
+    </style>
+    <div class="toolbar" id="toolbar"></div>
+    <div class="hint">상태를 고른 뒤 한 칸씩 누르거나, 마우스/손가락으로 여러 칸을 드래그하세요. 드래그가 끝나면 자동으로 저장됩니다.</div>
+    <div class="wrap"><div class="grid">
+      <div class="grid-header">{"".join(headers)}</div>
+      {"".join(rows_html)}
+    </div></div>
+    <script>
+      const dates = {date_json};
+      const minutes = {minute_json};
+      const blocked = {blocked_json};
+      const colors = {colors_json};
+      const selectedStatus = {selected_json};
+      const clearStatus = {clear_json};
+      const roomCode = {room_code_json};
+      const memberName = {member_json};
+      const toolbar = document.getElementById('toolbar');
+      const statuses = {status_json};
+      let currentStatus = selectedStatus;
+      const labels = Object.keys(colors);
+      const symbols = {{'합주 완전 가능':'가능','합주 가능(애매)':'애매','합주 가능(불편)':'불편','합주 완전 불가':'불가'}};
+      function addButton(label, value) {{
+        const b = document.createElement('button'); b.className='status-button'; b.textContent=label;
+        if (value===currentStatus) b.classList.add('active');
+        b.onclick=()=>{{ currentStatus=value; document.querySelectorAll('.status-button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); }};
+        toolbar.appendChild(b);
+      }}
+      labels.forEach(x=>addButton(symbols[x],x));
+      addButton('지우기', clearStatus);
+      const apply = document.createElement('button'); apply.className='apply-button'; apply.textContent='전체 적용';
+      apply.title='선택한 상태를 이번 주 전체(합주 금지 제외)에 적용';
+      apply.onclick=()=>{{
+        const slots=[...document.querySelectorAll('.slot:not(.blocked)')];
+        if(!confirm('이번 주의 합주 금지 시간을 제외한 모든 칸을 선택한 상태로 바꿀까요?')) return;
+        slots.forEach(x=>x.classList.add('drag-selected')); submitSlots(slots);
+      }};
+      toolbar.appendChild(apply);
+      let dragging=false, selected=new Set(), anchor=null;
+      function cellKey(el) {{ return el.dataset.date+'|'+el.dataset.minute; }}
+      function paintVisual(el) {{
+        el.classList.add('drag-selected');
+        if(currentStatus===clearStatus) el.style.background='#fff'; else el.style.background=colors[currentStatus];
+      }}
+      function addCell(el) {{ if(!el || el.classList.contains('blocked')) return; selected.add(cellKey(el)); paintVisual(el); }}
+      function rangeSelect(a,b) {{
+        if(!a || !b) return;
+        const dateA=a.dataset.date, dateB=b.dataset.date;
+        const minuteA=+a.dataset.minute, minuteB=+b.dataset.minute;
+        const loDate=Math.min(dates.indexOf(dateA), dates.indexOf(dateB));
+        const hiDate=Math.max(dates.indexOf(dateA), dates.indexOf(dateB));
+        const loMinute=Math.min(minuteA, minuteB), hiMinute=Math.max(minuteA, minuteB);
+        for(let di=loDate; di<=hiDate; di++) {{
+          document.querySelectorAll(`.slot[data-date="${{dates[di]}}"]`).forEach(el=>{{
+            const m=+el.dataset.minute; if(m>=loMinute&&m<=hiMinute) addCell(el);
+          }});
+        }}
+      }}
+      function submitSlots(elements) {{
+        const all = elements ? [...elements] : [...document.querySelectorAll('.slot.drag-selected:not(.blocked)')];
+        if(!all.length) return;
+        const grouped={{}};
+        all.forEach(el=>{{(grouped[el.dataset.date]??=[]).push(+el.dataset.minute);}});
+        const ranges=[];
+        Object.entries(grouped).forEach(([d,arr])=>{{arr.sort((a,b)=>a-b);let start=arr[0],prev=arr[0];for(let i=1;i<arr.length;i++){{if(arr[i]!==prev+15){{ranges.push(d+':'+start+'-'+prev);start=arr[i];}}prev=arr[i];}}ranges.push(d+':'+start+'-'+prev);}});
+        const params=new URLSearchParams(window.top.location.search);
+        params.set('room',roomCode); params.set('member',memberName); params.set('status',currentStatus); params.set('paint',ranges.join(';'));
+        window.top.location.href=window.top.location.pathname+'?'+params.toString();
+      }}
+      document.querySelectorAll('.slot:not(.blocked)').forEach(el=>{{
+        el.addEventListener('pointerdown',e=>{{ e.preventDefault(); dragging=true; selected.clear(); anchor=el; addCell(el); el.setPointerCapture?.(e.pointerId); }});
+        el.addEventListener('pointerenter',e=>{{ if(dragging) rangeSelect(anchor,el); }});
+        el.addEventListener('pointerup',e=>{{ if(dragging){{ dragging=false; submitSlots(); }} }});
+      }});
+      document.addEventListener('pointerup',()=>{{ if(dragging){{dragging=false;submitSlots();}} }});
+    </script>
+    """
+    components.html(html, height=min(1900, 92 + len(minutes)*18), scrolling=False)
 
 
 def render_schedule_grid(
@@ -628,6 +769,43 @@ def render_schedule_grid(
     st.markdown(style + table, unsafe_allow_html=True)
 
 
+def apply_bulk_status(
+    room: dict[str, str],
+    member_name: str,
+    dates: list[date],
+    minutes: list[int],
+    windows: list[dict[str, str]],
+    status: str,
+) -> None:
+    entries = read_rows(AVAILABILITY_FILE)
+    for selected_day in dates:
+        day_string = selected_day.isoformat()
+        for minute in minutes:
+            slot_time = minute_to_time(minute)
+            if is_unavailable(slot_time, windows):
+                continue
+            found = False
+            for entry in entries:
+                if (
+                    entry["room_code"] == room["room_code"]
+                    and entry["member_name"] == member_name
+                    and entry["date"] == day_string
+                    and entry["time"] == slot_time
+                ):
+                    entry["status"] = status
+                    found = True
+                    break
+            if not found:
+                entries.append({
+                    "room_code": room["room_code"],
+                    "member_name": member_name,
+                    "date": day_string,
+                    "time": slot_time,
+                    "status": status,
+                })
+    write_rows(AVAILABILITY_FILE, AVAILABILITY_FIELDS, entries)
+
+
 def show_schedule_input(
     room: dict[str, str],
     member_name: str,
@@ -645,21 +823,21 @@ def show_schedule_input(
         st.info("표시할 날짜 또는 시간이 없습니다.")
         return
 
-    selected_status = st.selectbox(
-        "색칠할 상태",
-        [*STATUS_OPTIONS, CLEAR_STATUS],
-        format_func=lambda value: (
-            f"{STATUS_MARKERS[value]} {value}"
-            if value in STATUS_MARKERS
-            else f"⬜ {CLEAR_STATUS}"
-        ),
-        key="availability_paint_status",
-    )
+    selected_status = STATUS_OPTIONS[0]
     st.caption(
         f"{dates[0]:%Y.%m.%d}–{dates[-1]:%Y.%m.%d} 주간 표입니다. "
-        "상태를 고른 뒤 칸을 누르면 해당 15분 시간대에 색이 적용됩니다."
+        "표 위의 상태 버튼을 고른 뒤 칸을 누르거나 드래그하세요."
     )
     show_status_legend()
+    bulk_col1, bulk_col2 = st.columns(2)
+    with bulk_col1:
+        if st.button("합주 금지 제외 전부 합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['room_code']}_{member_name}_{selected_date}"):
+            apply_bulk_status(room, member_name, dates, minutes, windows, STATUS_OPTIONS[0])
+            st.rerun()
+    with bulk_col2:
+        if st.button("합주 금지 제외 전부 합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['room_code']}_{member_name}_{selected_date}"):
+            apply_bulk_status(room, member_name, dates, minutes, windows, STATUS_OPTIONS[3])
+            st.rerun()
     if minutes and (minutes[0] > 0 or minutes[-1] < 1425):
         st.caption("하루의 시작이나 끝에 붙은 합주 금지 시간은 표에서 생략했습니다.")
     stored_entries = entries_for_dates(room["room_code"], dates)
@@ -774,6 +952,15 @@ def show_member_schedule(
         for key, status in statuses.items()
     }
     show_status_legend()
+    bulk_col1, bulk_col2 = st.columns(2)
+    with bulk_col1:
+        if st.button("합주 금지 제외 전부 합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['room_code']}_{member_name}_{selected_date}"):
+            apply_bulk_status(room, member_name, dates, minutes, windows, STATUS_OPTIONS[0])
+            st.rerun()
+    with bulk_col2:
+        if st.button("합주 금지 제외 전부 합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['room_code']}_{member_name}_{selected_date}"):
+            apply_bulk_status(room, member_name, dates, minutes, windows, STATUS_OPTIONS[3])
+            st.rerun()
     if minutes and (minutes[0] > 0 or minutes[-1] < 1425):
         st.caption("하루의 시작이나 끝에 붙은 합주 금지 시간은 표에서 생략했습니다.")
     render_schedule_grid(
@@ -817,6 +1004,30 @@ def show_host_settings(room: dict[str, str], member_name: str, windows: list[dic
             st.error(str(error))
 
 
+def show_rejoin_room() -> None:
+    if st.session_state.get("room_code") and st.session_state.get("member_name"):
+        return
+    room_code = st.query_params.get("room", "").strip()
+    member_name = st.query_params.get("member", "").strip()
+    if not room_code or not member_name:
+        return
+    room = get_room(room_code)
+    if not room or not any(member["name"] == member_name for member in room_members(room_code)):
+        return
+    if not room_password_enabled(room):
+        set_room_session(room_code, member_name)
+        return
+    st.info(f"이전에 **{room['room_name']}** 방({room_code})에 참여했던 기록이 있습니다.")
+    with st.form("restore_room_form"):
+        password = st.text_input("방 비밀번호", type="password")
+        if st.form_submit_button("이 방으로 다시 들어가기", type="primary", use_container_width=True):
+            if verify_room_password(room, password):
+                set_room_session(room_code, member_name)
+                st.rerun()
+            else:
+                st.error("방 비밀번호가 맞지 않습니다.")
+
+
 def show_active_room() -> None:
     room_code = st.session_state.get("room_code", "")
     member_name = st.session_state.get("member_name", "")
@@ -840,8 +1051,7 @@ def show_active_room() -> None:
         f"{room_start.strftime('%Y.%m.%d')} – {room_end.strftime('%Y.%m.%d')} · 멤버 {len(members)}명"
     )
     if action_col.button("방 나가기", use_container_width=True):
-        st.session_state.pop("room_code", None)
-        st.session_state.pop("member_name", None)
+        clear_room_session()
         st.rerun()
     st.info(f"초대할 멤버에게 방 코드 **{room_code}**를 공유하세요.")
 
@@ -872,9 +1082,12 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     ensure_data_files()
     migrate_legacy_statuses()
+    restore_room_from_query()
+    apply_paint_ranges_from_query()
     st.title(APP_TITLE)
     st.caption("멤버들의 15분 단위 일정을 모아 다 같이 합주하기 좋은 시간을 찾아보세요.")
 
+    show_rejoin_room()
     create_tab, join_tab = st.tabs(["방 만들기", "방 참여"])
     with create_tab:
         show_room_creation()
