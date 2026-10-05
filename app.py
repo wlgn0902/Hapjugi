@@ -44,11 +44,7 @@ def get_supabase() -> Client:
         id_token = st.user.tokens["id"]
         if id_token:
             response = client.auth.sign_in_with_id_token(
-                {
-                    "provider": "google",
-                    "token": id_token,
-                    "skip_nonce_check": True,
-                }
+                {"provider": "google", "token": id_token}
             )
             if getattr(response, "session", None):
                 return client
