@@ -155,7 +155,7 @@ def make_room_code() -> str:
 def db_rooms_for_user(user_id: str) -> list[dict[str, Any]]:
     memberships = (
         SUPABASE.table("room_members")
-        .select("room_id,display_name,role")
+        .select("room_id,name,role")
         .eq("user_id", user_id)
         .execute()
         .data
@@ -193,7 +193,7 @@ def get_room(room_id: str) -> dict[str, Any] | None:
 def get_members(room_id: str) -> list[dict[str, Any]]:
     return (
         SUPABASE.table("room_members")
-        .select("id,user_id,display_name,role,joined_at")
+        .select("id,user_id,name,role,joined_at")
         .eq("room_id", room_id)
         .order("joined_at")
         .execute()
@@ -208,10 +208,10 @@ def get_availability(room_id: str, dates: list[date]) -> list[dict[str, Any]]:
     start, end = dates[0].isoformat(), dates[-1].isoformat()
     return (
         SUPABASE.table("availability")
-        .select("id,user_id,schedule_date,schedule_time,status")
+        .select("id,user_id,date,time,status")
         .eq("room_id", room_id)
-        .gte("schedule_date", start)
-        .lte("schedule_date", end)
+        .gte("date", start)
+        .lte("date", end)
         .execute()
         .data
         or []
@@ -223,11 +223,11 @@ def upsert_slot(room_id: str, user_id: str, selected_date: date, minute: int, st
         {
             "room_id": room_id,
             "user_id": user_id,
-            "schedule_date": selected_date.isoformat(),
-            "schedule_time": minute_to_time(minute),
+            "date": selected_date.isoformat(),
+            "time": minute_to_time(minute),
             "status": status,
         },
-        on_conflict="room_id,user_id,schedule_date,schedule_time",
+        on_conflict="room_id,user_id,date,time",
     ).execute()
 
 
@@ -236,8 +236,8 @@ def clear_slot(room_id: str, user_id: str, selected_date: date, minute: int) -> 
         {
             "room_id": room_id,
             "user_id": user_id,
-            "schedule_date": selected_date.isoformat(),
-            "schedule_time": minute_to_time(minute),
+            "date": selected_date.isoformat(),
+            "time": minute_to_time(minute),
         }
     ).execute()
 
@@ -264,40 +264,52 @@ def bulk_set(
                 {
                     "room_id": room_id,
                     "user_id": user_id,
-                    "schedule_date": selected_date.isoformat(),
-                    "schedule_time": slot,
+                    "date": selected_date.isoformat(),
+                    "time": slot,
                     "status": status,
                 }
             )
     if rows:
         SUPABASE.table("availability").upsert(
             rows,
-            on_conflict="room_id,user_id,schedule_date,schedule_time",
+            on_conflict="room_id,user_id,date,time",
         ).execute()
 
 
 def create_room(room_name: str, display_name: str, password: str, start: date, end: date, windows: list[dict[str, str]]) -> dict[str, Any]:
-    for _ in range(10):
-        code = make_room_code()
-        try:
-            result = SUPABASE.rpc(
-                "create_room",
-                {
-                    "p_room_code": code,
-                    "p_room_name": room_name,
-                    "p_password": password or None,
-                    "p_start_date": start.isoformat(),
-                    "p_end_date": end.isoformat(),
-                    "p_unavailable_windows": windows,
-                    "p_display_name": display_name,
-                },
-            ).execute()
-            if result.data:
-                return result.data[0] if isinstance(result.data, list) else result.data
-        except Exception as exc:
-            if "rooms_code_check" not in str(exc) and "duplicate key" not in str(exc).lower():
-                raise
-    raise RuntimeError("방 코드를 생성하지 못했습니다. 다시 시도해 주세요.")
+    code = make_room_code()
+    password_hash_value = None
+    if password:
+        import bcrypt
+        password_hash_value = bcrypt.hashpw(
+            password.encode("utf-8"),
+            bcrypt.gensalt()
+        ).decode("utf-8")
+
+    result = SUPABASE.rpc(
+        "create_room",
+        {
+            "p_room_code": code,
+            "p_room_name": room_name,
+            "p_host_name": display_name,
+            "p_start_date": start.isoformat(),
+            "p_end_date": end.isoformat(),
+            "p_password_hash": password_hash_value,
+        },
+    ).execute()
+
+    room_id = result.data[0] if isinstance(result.data, list) else result.data
+    if not room_id:
+        raise RuntimeError("방 생성에 실패했습니다.")
+
+    SUPABASE.table("rooms").update(
+        {"unavailable_windows": windows}
+    ).eq("id", room_id).execute()
+
+    room = get_room(str(room_id))
+    if not room:
+        raise RuntimeError("방 생성 후 방 정보를 불러오지 못했습니다.")
+    return room
 
 
 def lookup_room_by_code(code: str) -> dict[str, Any] | None:
@@ -312,13 +324,17 @@ def join_room(code: str, password: str, display_name: str) -> dict[str, Any]:
         "join_room",
         {
             "p_room_code": code,
+            "p_name": display_name,
             "p_password": password or None,
-            "p_display_name": display_name,
         },
     ).execute()
-    if not result.data:
+    room_id = result.data[0] if isinstance(result.data, list) else result.data
+    if not room_id:
         raise RuntimeError("방 참여에 실패했습니다.")
-    return result.data[0] if isinstance(result.data, list) else result.data
+    room = get_room(str(room_id))
+    if not room:
+        raise RuntimeError("방 참여 후 방 정보를 불러오지 못했습니다.")
+    return room
 
 
 def show_status_legend() -> None:
@@ -368,7 +384,7 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
 def render_editable_grid(room, user_id, dates, minutes, windows, statuses, selected_status):
     weekday = "월화수목금토일"
     columns = [0.8] + [1.0] * len(dates)
-    header = st.columns(columns, gap="small")
+    header = st.columns(columns, gap=None)
     header[0].markdown("**시간**")
     for c, d in zip(header[1:], dates):
         c.markdown(f"**{d:%m/%d}**<br>{weekday[d.weekday()]}", unsafe_allow_html=True)
@@ -385,7 +401,7 @@ def render_editable_grid(room, user_id, dates, minutes, windows, statuses, selec
     )
 
     for minute in minutes:
-        row = st.columns(columns, gap="small")
+        row = st.columns(columns, gap=None)
         row[0].markdown(format_hour_label(minute) or "&nbsp;", unsafe_allow_html=True)
         slot = minute_to_time(minute)
         for col, d in zip(row[1:], dates):
@@ -454,7 +470,7 @@ def show_room_creation(user_id: str):
             windows.append({"start": s, "end": e})
     try:
         created = create_room(room_name, host_name, password.strip(), start, end, windows)
-        st.session_state["active_room_id"] = created["room_id"]
+        st.session_state["active_room_id"] = created["id"]
         st.success(f"방을 만들었습니다. 방 코드: **{created['room_code']}**")
         st.rerun()
     except Exception as exc:
@@ -483,7 +499,7 @@ def show_join_room():
             st.error("해당 코드의 방을 찾을 수 없습니다.")
             return
         joined = join_room(code, password.strip(), name)
-        st.session_state["active_room_id"] = joined["room_id"]
+        st.session_state["active_room_id"] = joined["id"]
         st.success(f"'{room['room_name']}' 방에 참여했습니다.")
         st.rerun()
     except Exception:
@@ -510,7 +526,7 @@ def show_schedule_input(room, user_id, selected_date, windows):
     if b1.button("합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['id']}"):
         try:
             rows = get_availability(room["id"], dates)
-            mine = {(str(r["schedule_date"]), str(r["schedule_time"])[:5]) for r in rows if r["user_id"] == user_id}
+            mine = {(str(r["date"]), str(r["time"])[:5]) for r in rows if r["user_id"] == user_id}
             bulk_set(room["id"], user_id, dates, minutes, windows, STATUS_OPTIONS[0], mine)
             st.rerun()
         except Exception as exc:
@@ -518,7 +534,7 @@ def show_schedule_input(room, user_id, selected_date, windows):
     if b2.button("합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['id']}"):
         try:
             rows = get_availability(room["id"], dates)
-            mine = {(str(r["schedule_date"]), str(r["schedule_time"])[:5]) for r in rows if r["user_id"] == user_id}
+            mine = {(str(r["date"]), str(r["time"])[:5]) for r in rows if r["user_id"] == user_id}
             bulk_set(room["id"], user_id, dates, minutes, windows, STATUS_OPTIONS[3], mine)
             st.rerun()
         except Exception as exc:
@@ -527,7 +543,7 @@ def show_schedule_input(room, user_id, selected_date, windows):
 
     rows = get_availability(room["id"], dates)
     statuses = {
-        (str(r["schedule_date"]), str(r["schedule_time"])[:5]): r["status"]
+        (str(r["date"]), str(r["time"])[:5]): r["status"]
         for r in rows if r["user_id"] == user_id
     }
     render_editable_grid(room, user_id, dates, minutes, windows, statuses, selected_status)
@@ -541,7 +557,7 @@ def show_overview(room, members, selected_date, windows):
         st.info("표시할 날짜 또는 시간이 없습니다.")
         return
     rows = get_availability(room["id"], dates)
-    lookup = {(str(r["schedule_date"]), str(r["user_id"]), str(r["schedule_time"])[:5]): r["status"] for r in rows}
+    lookup = {(str(r["date"]), str(r["user_id"]), str(r["time"])[:5]): r["status"] for r in rows}
     statuses, titles = {}, {}
     ideal = pending = unavailable = 0
     for d in dates:
@@ -576,16 +592,16 @@ def show_overview(room, members, selected_date, windows):
 
 def show_member_schedule(room, members, selected_date, windows):
     st.subheader("멤버별 일정")
-    names = [m["display_name"] for m in members]
+    names = [m["name"] for m in members]
     if not names:
         return
     name = st.selectbox("일정을 확인할 멤버", names, key=f"member_choice_{room['id']}")
-    member = next(m for m in members if m["display_name"] == name)
+    member = next(m for m in members if m["name"] == name)
     dates = week_dates(room, selected_date)
     minutes = visible_minutes(windows)
     rows = get_availability(room["id"], dates)
     statuses = {
-        (str(r["schedule_date"]), str(r["schedule_time"])[:5]): r["status"]
+        (str(r["date"]), str(r["time"])[:5]): r["status"]
         for r in rows if r["user_id"] == member["user_id"]
     }
     show_status_legend()
@@ -624,7 +640,7 @@ def show_my_rooms(user_id: str):
         st.info("아직 참여한 합주 방이 없습니다. 방을 만들거나 초대 코드로 참여해 주세요.")
         return None
     labels = {
-        r["id"]: f"{r['room_name']} · 코드 {r['room_code']} · 내 역할 {r['my_membership'].get('role', 'member')}"
+        r["id"]: f"{r['room_name']} · 코드 {r['room_code']} · 내 역할 {r['my_membership'].get('role', '회원')}"
         for r in rooms
     }
     ids = [r["id"] for r in rooms]
@@ -649,7 +665,7 @@ def show_active_room(user_id: str):
     end = date.fromisoformat(str(room["end_date"]))
     title, actions = st.columns([4, 1])
     title.subheader(room["room_name"])
-    title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['display_name']}** · {start:%Y.%m.%d} – {end:%Y.%m.%d} · 멤버 {len(members)}명")
+    title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}** · {start:%Y.%m.%d} – {end:%Y.%m.%d} · 멤버 {len(members)}명")
     if actions.button("방 나가기", use_container_width=True):
         try:
             SUPABASE.table("room_members").delete().eq("room_id", room["id"]).eq("user_id", user_id).execute()
