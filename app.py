@@ -952,15 +952,6 @@ def show_member_schedule(
         for key, status in statuses.items()
     }
     show_status_legend()
-    bulk_col1, bulk_col2 = st.columns(2)
-    with bulk_col1:
-        if st.button("합주 금지 제외 전부 합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['room_code']}_{member_name}_{selected_date}"):
-            apply_bulk_status(room, member_name, dates, minutes, windows, STATUS_OPTIONS[0])
-            st.rerun()
-    with bulk_col2:
-        if st.button("합주 금지 제외 전부 합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['room_code']}_{member_name}_{selected_date}"):
-            apply_bulk_status(room, member_name, dates, minutes, windows, STATUS_OPTIONS[3])
-            st.rerun()
     if minutes and (minutes[0] > 0 or minutes[-1] < 1425):
         st.caption("하루의 시작이나 끝에 붙은 합주 금지 시간은 표에서 생략했습니다.")
     render_schedule_grid(
