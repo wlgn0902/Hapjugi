@@ -44,13 +44,18 @@ def get_supabase() -> Client:
         id_token = st.user.tokens["id"]
         if id_token:
             response = client.auth.sign_in_with_id_token(
-                {"provider": "google", "token": id_token}
+                {
+                    "provider": "google",
+                    "token": id_token,
+                    "skip_nonce_check": True,
+                }
             )
             if getattr(response, "session", None):
                 return client
     except Exception as exc:
         st.error(f"Supabase 로그인 연결에 실패했습니다: {exc}")
         st.stop()
+
     return client
 
 
