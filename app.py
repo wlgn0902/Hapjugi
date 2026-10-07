@@ -41,14 +41,58 @@ def get_supabase() -> Client:
         return client
 
     try:
-        id_token = st.user.tokens["id"]
+        tokens = st.user.tokens
+        id_token = tokens.get("id")
+
+        # Google ID token의 만료 시각 확인
         if id_token:
-            response = client.auth.sign_in_with_id_token(
-                {"provider": "google", "token": id_token}
-            )
-            if getattr(response, "session", None):
-                return client
+            import base64
+            import json
+            import time
+
+            parts = id_token.split(".")
+            if len(parts) == 3:
+                payload = parts[1]
+                payload += "=" * (-len(payload) % 4)
+                claims = json.loads(
+                    base64.urlsafe_b64decode(payload).decode("utf-8")
+                )
+
+                exp = claims.get("exp")
+                if exp and time.time() >= exp:
+                    # Streamlit의 오래된 Google 로그인 세션을 버리고
+                    # Google에서 새 ID token을 받도록 다시 로그인
+                    st.logout()
+                    st.login()
+                    st.stop()
+
+        if not id_token:
+            st.logout()
+            st.login()
+            st.stop()
+
+        response = client.auth.sign_in_with_id_token(
+            {
+                "provider": "google",
+                "token": id_token,
+            }
+        )
+
+        if getattr(response, "session", None):
+            return client
+
+        st.error("Google 로그인 세션을 Supabase에 연결하지 못했습니다.")
+        st.stop()
+
     except Exception as exc:
+        error_text = str(exc)
+
+        # 오래된/무효 Google ID token이면 새 로그인으로 갱신
+        if "Bad ID token" in error_text or "expired" in error_text.lower():
+            st.logout()
+            st.login()
+            st.stop()
+
         st.error(f"Supabase 로그인 연결에 실패했습니다: {exc}")
         st.stop()
 
