@@ -6,10 +6,12 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 APP_TITLE = "합주기가 됩시다 합"
 APP_URL = "https://lets-be-hapjugi.streamlit.app/"
+SCHEDULE_COMPONENT = components.declare_component("schedule_grid", path="schedule_grid_component")
 
 STATUS_OPTIONS = [
     "합주 완전 가능",
@@ -57,8 +59,6 @@ def get_supabase() -> Client:
 def require_login() -> None:
     if not getattr(st.user, "is_logged_in", False):
         st.title(APP_TITLE)
-        st.caption("멤버들의 15분 단위 일정을 모아 다 같이 합주하기 좋은 시간을 찾아보세요.")
-        st.info("일정을 저장하고 새로고침 후에도 내 방과 내 일정을 찾으려면 Google 로그인이 필요합니다.")
         st.button("Google로 로그인", type="primary", use_container_width=True, on_click=st.login)
         st.stop()
 
@@ -138,8 +138,30 @@ def week_dates(room: dict[str, Any], selected_date: date) -> list[date]:
 
 
 def visible_minutes(windows: list[dict[str, Any]], selected_date: date | None = None) -> list[int]:
-    # 하루 전체를 유지한다. 날짜별 제외 시간은 각 셀에서만 막아 준다.
     return list(range(0, 1440, 15))
+
+
+def all_room_dates(room: dict[str, Any]) -> list[date]:
+    room_start = date.fromisoformat(str(room["start_date"]))
+    room_end = date.fromisoformat(str(room["end_date"]))
+    return [room_start + timedelta(days=i) for i in range((room_end-room_start).days + 1)]
+
+
+def effective_windows_for_date(windows: list[dict[str, Any]], selected_date: date) -> list[dict[str, Any]]:
+    return [w for w in windows if window_applies(w, selected_date)]
+
+
+def compact_visible_minutes_for_date(windows: list[dict[str, Any]], selected_date: date) -> list[int]:
+    slots = list(range(0, 1440, 15))
+    blocked = {m for m in slots if is_unavailable(minute_to_time(m), windows, selected_date)}
+    first, last = 0, len(slots) - 1
+    while first <= last and slots[first] in blocked:
+        first += 1
+    while last >= first and slots[last] in blocked:
+        last -= 1
+    return slots[first:last + 1]
+
+
 
 def format_hour_label(minute: int) -> str:
     if minute % 60:
@@ -327,7 +349,7 @@ def show_status_legend() -> None:
         f'<span class="legend-item"><i style="background:{STATUS_COLORS[s]}"></i>{s}</span>'
         for s in STATUS_OPTIONS
     )
-    items += '<span class="legend-item"><i class="blocked-swatch"></i>선택 제외</span>'
+    items += '<span class="legend-item"><i class="blocked-swatch"></i>합주 제외</span>'
     st.markdown(f'<div class="legend">{items}</div>', unsafe_allow_html=True)
 
 def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None:
@@ -341,7 +363,7 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
         for d in dates:
             key = (d.isoformat(), slot)
             if is_unavailable(slot, windows, d):
-                cells.append('<td class="cell blocked" title="선택 제외 시간대"></td>')
+                cells.append('<td class="cell blocked" title="합주 제외 시간대"></td>')
             else:
                 status = statuses.get(key, "")
                 cls = STATUS_CLASSES.get(status, "empty")
@@ -359,64 +381,64 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
     </style>
     """ + f'<div class="grid-wrap"><table class="grid"><thead><tr><th class="time">시간</th>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
 
-def render_editable_grid(room, user_id, dates, minutes, windows, statuses, selected_status):
-    weekday = "월화수목금토일"
-    columns = [0.8] + [1.0] * len(dates)
-    header = st.columns(columns, gap="small")
-    header[0].markdown("**시간**")
-    for c, d in zip(header[1:], dates):
-        c.markdown(f"**{d:%m/%d}**<br>{weekday[d.weekday()]}", unsafe_allow_html=True)
+def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule"):
+    payload_statuses = {f"{d.isoformat()}|{minute_to_time(m)}": statuses.get((d.isoformat(), minute_to_time(m)), "") for d in dates for m in minutes}
+    blocked = {f"{d.isoformat()}|{minute_to_time(m)}" for d in dates for m in minutes if is_unavailable(minute_to_time(m), windows, d)}
+    hidden = set()
+    for d in dates:
+        visible = compact_visible_minutes_for_date(windows, d)
+        if visible:
+            lo, hi = min(visible), max(visible)
+            for m in minutes:
+                if m < lo or m > hi:
+                    hidden.add(f"{d.isoformat()}|{minute_to_time(m)}")
+        else:
+            hidden.update(f"{d.isoformat()}|{minute_to_time(m)}" for m in minutes)
+    result = SCHEDULE_COMPONENT(
+        dates=[d.isoformat() for d in dates],
+        minutes=minutes,
+        statuses=payload_statuses,
+        blocked=list(blocked),
+        hidden=list(hidden),
+        status_options=STATUS_OPTIONS,
+        selected_status=selected_status,
+        editable=editable,
+        key=key,
+        default=None,
+    )
+    if editable and result and result.get("action") == "paint":
+        cells = result.get("cells") or []
+        status = result.get("status") or selected_status
+        for cell in cells:
+            d = date.fromisoformat(cell["date"])
+            m = int(cell["minute"])
+            if is_unavailable(minute_to_time(m), windows, d):
+                continue
+            if status == CLEAR_STATUS:
+                clear_slot(room["id"], user_id, d, m)
+            else:
+                upsert_slot(room["id"], user_id, d, m, status)
+        st.rerun()
 
-    css = ["""
-    <style>
-    div[class*="slotbtn_"]{padding:0!important;margin:0!important}
-    div[class*="slotbtn_"] button{height:18px!important;min-height:18px!important;padding:0!important;border-radius:0!important;border:1px solid #d1d5db!important;box-shadow:none!important;transition:none!important}
-    div[class*="slotbtn_"] button p{margin:0!important;font-size:0!important}
-    </style>
-    """]
-    for minute in minutes:
-        row = st.columns(columns, gap="small")
-        row[0].markdown(format_hour_label(minute) or "&nbsp;", unsafe_allow_html=True)
-        slot = minute_to_time(minute)
-        for col, d in zip(row[1:], dates):
-            key = (d.isoformat(), slot)
-            status = statuses.get(key, "")
-            blocked = is_unavailable(slot, windows, d)
-            cls = STATUS_CLASSES.get(status, "empty").replace("-", "_")
-            if blocked:
-                cls = "blocked"
-            color = "#374151" if blocked else STATUS_COLORS.get(status, "#ffffff")
-            text_color = "#ffffff" if blocked or status in (STATUS_OPTIONS[0], STATUS_OPTIONS[2], STATUS_OPTIONS[3]) else "#111827"
-            slot_class = f"st-key-slotbtn_{room['id']}_{d:%Y%m%d}_{minute}_{cls}"
-            css.append(f'<style>div[class*=\"{slot_class}\"] button{{background:{color}!important;color:{text_color}!important;}} div[class*=\"{slot_class}\"] button:hover{{background:{color}!important;color:{text_color}!important;}}</style>')
-            with col.container(key=f"slotbtn_{room['id']}_{d:%Y%m%d}_{minute}_{cls}"):
-                clicked = st.button(" ", key=f"slot_{room['id']}_{d:%Y%m%d}_{minute}", disabled=blocked, use_container_width=True, help=f"{d:%m/%d} {slot} · {'선택 제외' if blocked else status or '미입력'}")
-            if clicked:
-                try:
-                    if selected_status == CLEAR_STATUS:
-                        clear_slot(room["id"], user_id, d, minute)
-                    else:
-                        upsert_slot(room["id"], user_id, d, minute, selected_status)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"일정 저장에 실패했습니다: {exc}")
-    st.markdown("".join(css), unsafe_allow_html=True)
 
 def _window_editor(prefix: str, room_start: date, room_end: date, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if "create_window_count" not in st.session_state:
         st.session_state["create_window_count"] = max(1, len(windows))
     count = st.session_state["create_window_count"]
     dates = [room_start + timedelta(days=i) for i in range((room_end-room_start).days + 1)]
-    st.markdown("**선택 제외 시간대 설정**")
-    st.caption("체크했을 때만 시간대를 설정할 수 있습니다. +를 누르면 시간대를 추가할 수 있습니다. 날짜 적용은 전체·주중·주말·특정 날짜로 정할 수 있습니다.")
-    enabled = st.checkbox("선택 제외 시간대 설정 사용", value=bool(windows) or count > 0, key=f"{prefix}_enabled")
+    st.markdown("**합주 제외 시간대 설정**")
+    enabled = st.checkbox("합주 제외 시간대 설정", value=bool(windows) or count > 0, key=f"{prefix}_enabled")
     if not enabled:
         return []
+    if count == 0:
+        count = 1
+        st.session_state["create_window_count"] = 1
+        st.rerun()
     for i in range(count):
         old = windows[i] if i < len(windows) else {"start":"00:00","end":"06:00","scope":"all","dates":[]}
         with st.container(border=True):
             h1,h2 = st.columns([5,1])
-            h1.markdown(f"**선택 제외 시간대 {i+1}**")
+            h1.markdown(f"**합주 제외 시간대 {i+1}**")
             if h2.button("삭제", key=f"{prefix}_del_{i}"):
                 st.session_state[f"{prefix}_delete"] = i
                 st.rerun()
@@ -431,7 +453,7 @@ def _window_editor(prefix: str, room_start: date, room_end: date, windows: list[
             if scope=="dates":
                 chosen=st.multiselect("날짜", dates, default=[date.fromisoformat(x) for x in old.get("dates",[]) if x in {d.isoformat() for d in dates}], format_func=lambda d:f"{d:%m/%d} ({'월화수목금토일'[d.weekday()]})", key=f"{prefix}_dates_{i}")
             st.session_state[f"{prefix}_values_{i}"]={"start":s,"end":e,"scope":scope,"dates":[d.isoformat() for d in chosen]}
-    if st.button("＋ 선택 제외 시간대 추가", key=f"{prefix}_add", use_container_width=True):
+    if st.button("+", key=f"{prefix}_add", use_container_width=True):
         st.session_state["create_window_count" if prefix=="create" else f"{prefix}_count"] = count+1
         st.rerun()
     return [st.session_state.get(f"{prefix}_values_{i}", {}) for i in range(count)]
@@ -472,12 +494,13 @@ def show_room_creation(user_id: str):
         valid=[]
         for w in windows:
             if not w: continue
-            if w["start"]==w["end"]: st.error("선택 제외 시간대의 시작과 종료를 다르게 설정해 주세요."); return
+            if w["start"]==w["end"]: st.error("합주 제외 시간대의 시작과 종료를 다르게 설정해 주세요."); return
             if w["scope"]=="dates" and not w["dates"]: st.error("날짜 선택을 사용한 시간대에는 최소 한 날짜를 골라 주세요."); return
             valid.append(w)
         try:
             created=create_room(room_name,host_name,password.strip(),start,end,valid)
             st.session_state["active_room_id"]=created["id"]
+            st.session_state["main_section"]="내 합주실"
             st.success(f"방을 만들었습니다. 방 코드: **{created['room_code']}**")
             st.rerun()
         except Exception as exc:
@@ -506,110 +529,102 @@ def show_join_room():
             return
         joined = join_room(code, password.strip(), name)
         st.session_state["active_room_id"] = joined["id"]
+        st.session_state["main_section"] = "내 합주실"
         st.success(f"'{room['room_name']}' 방에 참여했습니다.")
         st.rerun()
     except Exception:
         st.error("방 코드 또는 비밀번호가 맞지 않습니다.")
 
 
-def show_schedule_input(room, user_id, selected_date, windows):
+def show_schedule_input(room, user_id, windows):
     st.subheader("내 일정 입력")
-    dates = week_dates(room, selected_date)
+    dates = all_room_dates(room)
     minutes = visible_minutes(windows)
-    if not dates or not minutes:
-        st.info("표시할 날짜 또는 시간이 없습니다.")
-        return
     selected_status = st.radio("입력할 상태", [*STATUS_OPTIONS, CLEAR_STATUS], horizontal=True, key=f"paint_status_{room['id']}")
-    st.caption("색깔을 고른 뒤 원하는 칸을 누르세요. 전체 지우기는 현재 주의 입력을 모두 지웁니다.")
-    show_status_legend()
+    rows = get_availability(room["id"], dates)
+    statuses = {(str(r["date"]), str(r["time"])[:5]): r["status"] for r in rows if r["user_id"] == user_id}
     b1,b2,b3=st.columns(3)
     if b1.button("합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['id']}"):
-        rows=get_availability(room['id'],dates); mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
+        mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
         bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[0],mine); st.rerun()
     if b2.button("합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['id']}"):
-        rows=get_availability(room['id'],dates); mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
+        mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
         bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[3],mine); st.rerun()
     if b3.button("전체 지우기", use_container_width=True, key=f"bulk_clear_{room['id']}"):
-        SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).gte('date',dates[0].isoformat()).lte('date',dates[-1].isoformat()).execute(); st.rerun()
-    rows=get_availability(room['id'],dates)
-    statuses={(str(r['date']),str(r['time'])[:5]):r['status'] for r in rows if r['user_id']==user_id}
-    render_editable_grid(room,user_id,dates,minutes,windows,statuses,selected_status)
+        SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.rerun()
+    show_status_legend()
+    render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}")
 
-def show_overview(room, members, selected_date, windows):
+
+def show_overview(room, members, windows):
     st.subheader("합주 가능 시간")
-    dates=week_dates(room,selected_date); minutes=visible_minutes(windows)
-    if not dates or not minutes: st.info("표시할 날짜 또는 시간이 없습니다."); return
+    dates=all_room_dates(room); minutes=visible_minutes(windows)
     rows=get_availability(room['id'],dates)
     lookup={(str(r['date']),str(r['user_id']),str(r['time'])[:5]):r['status'] for r in rows}
-    statuses={}; titles={}; ideal=pending=unavailable=0
+    statuses={}; ideal=pending=unavailable=0
     for d in dates:
         dk=d.isoformat()
         for minute in minutes:
             slot=minute_to_time(minute); key=(dk,slot)
-            if is_unavailable(slot,windows,d):
-                unavailable+=1; titles[key]='선택 제외 시간대'; continue
+            if is_unavailable(slot,windows,d): unavailable+=1; continue
             values=[lookup.get((dk,str(m['user_id']),slot)) for m in members]
             received=[v for v in values if v in STATUS_OPTIONS]; missing=len(members)-len(received)
             if missing: pending+=1
-            if not received: titles[key]='응답 대기'; continue
-            worst=max(received,key=STATUS_OPTIONS.index); statuses[key]=worst; titles[key]=f'{worst} · {len(received)}/{len(members)}명 응답'
-            if missing==0 and worst==STATUS_OPTIONS[0]: ideal+=1
+            if received: statuses[key]=max(received,key=STATUS_OPTIONS.index)
+            if missing==0 and received and statuses[key]==STATUS_OPTIONS[0]: ideal+=1
     c1,c2,c3=st.columns(3)
-    c1.metric('이번 주 전원 합주 가능',f'{ideal*15//60}시간 {ideal*15%60}분')
-    c2.metric('이번 주 응답 대기',f'{pending}칸')
-    c3.metric('이번 주 선택 제외',f'{unavailable}칸')
-    show_status_legend(); render_readonly_grid(dates,minutes,windows,statuses,titles)
-
-def show_member_schedule(room, members, selected_date, windows):
-    st.subheader("멤버별 일정")
-    names = [m["name"] for m in members]
-    if not names:
-        return
-    name = st.selectbox("일정을 확인할 멤버", names, key=f"member_choice_{room['id']}")
-    member = next(m for m in members if m["name"] == name)
-    dates = week_dates(room, selected_date)
-    minutes = visible_minutes(windows)
-    rows = get_availability(room["id"], dates)
-    statuses = {
-        (str(r["date"]), str(r["time"])[:5]): r["status"]
-        for r in rows if r["user_id"] == member["user_id"]
-    }
+    c1.metric('전원 합주 가능',f'{ideal*15//60}시간 {ideal*15%60}분')
+    c2.metric('응답 대기',f'{pending}칸')
+    c3.metric('합주 제외',f'{unavailable}칸')
     show_status_legend()
-    render_readonly_grid(dates, minutes, windows, statuses)
+    render_schedule_component(room,"",dates,minutes,windows,statuses,"",editable=False,key=f"overview_{room['id']}")
+
+
+def show_member_schedule(room, members, windows):
+    st.subheader("멤버별 일정")
+    names=[m['name'] for m in members]
+    if not names: return
+    name=st.selectbox("일정을 확인할 멤버",names,key=f"member_choice_{room['id']}")
+    member=next(m for m in members if m['name']==name)
+    dates=all_room_dates(room); minutes=visible_minutes(windows)
+    rows=get_availability(room['id'],dates)
+    statuses={(str(r['date']),str(r['time'])[:5]):r['status'] for r in rows if r['user_id']==member['user_id']}
+    show_status_legend()
+    render_schedule_component(room,"",dates,minutes,windows,statuses,"",editable=False,key=f"member_{room['id']}_{member['user_id']}")
 
 
 def show_host_settings(room, windows):
     st.subheader("방장 설정")
-    if f"host_window_count_{room['id']}" not in st.session_state:
-        st.session_state[f"host_window_count_{room['id']}"]=len(windows)
-    prefix=f"host_{room['id']}"; count=st.session_state[f"host_window_count_{room['id']}"]
-    dates=[date.fromisoformat(str(room['start_date']))+timedelta(days=i) for i in range((date.fromisoformat(str(room['end_date']))-date.fromisoformat(str(room['start_date']))).days+1)]
-    enabled=st.checkbox("선택 제외 시간대 설정",value=bool(windows),key=f"{prefix}_enabled")
+    prefix=f"host_{room['id']}"
+    count_key=f"host_window_count_{room['id']}"
+    if count_key not in st.session_state: st.session_state[count_key]=len(windows)
+    enabled=st.checkbox("합주 제외 시간대 설정",value=bool(windows),key=f"{prefix}_enabled")
+    if enabled and st.session_state[count_key] == 0:
+        st.session_state[count_key]=1
+        st.rerun()
+    dates=all_room_dates(room)
     selected=[]
     if enabled:
-        for i in range(count):
+        for i in range(st.session_state[count_key]):
             old=windows[i] if i<len(windows) else {'start':'00:00','end':'06:00','scope':'all','dates':[]}
-            with st.container(border=True):
-                h1,h2=st.columns([5,1]); h1.markdown(f'**선택 제외 시간대 {i+1}**')
-                if h2.button('삭제',key=f'{prefix}_del_{i}'):
-                    st.session_state[f'{prefix}_delete']=i; st.rerun()
-                a,b=st.columns(2); opts=time_choices(); eopts=time_choices(True)
-                sv=a.selectbox('시작',opts,index=opts.index(old.get('start','00:00')),key=f'{prefix}_s_{i}')
-                ev=b.selectbox('종료',eopts,index=eopts.index(old.get('end','06:00')),key=f'{prefix}_e_{i}')
-                scopes=['all','weekdays','weekends','dates']; labels={'all':'전체','weekdays':'주중','weekends':'주말','dates':'날짜 선택'}
-                scope=st.radio('적용 날짜',scopes,index=scopes.index(old.get('scope','all')),format_func=lambda x:labels[x],horizontal=True,key=f'{prefix}_scope_{i}')
-                chosen=st.multiselect('날짜',dates,default=[date.fromisoformat(x) for x in old.get('dates',[]) if x in {d.isoformat() for d in dates}],format_func=lambda d:f'{d:%m/%d} ({"월화수목금토일"[d.weekday()]})',key=f'{prefix}_dates_{i}') if scope=='dates' else []
-                selected.append({'start':sv,'end':ev,'scope':scope,'dates':[d.isoformat() for d in chosen]})
-        if st.button('＋ 선택 제외 시간대 추가',key=f'{prefix}_add',use_container_width=True):
-            st.session_state[f"host_window_count_{room['id']}"]=count+1; st.rerun()
-    if st.session_state.pop(f'{prefix}_delete',None) is not None:
-        idx=st.session_state.pop(f'{prefix}_delete',0)
-        selected=[w for j,w in enumerate(selected) if j!=idx]
-        st.session_state[f"host_window_count_{room['id']}"]=max(0,count-1)
-    if st.button('선택 제외 시간대 저장',type='primary',key=f'{prefix}_save',use_container_width=True):
+            a,b=st.columns(2); opts=time_choices(); eopts=time_choices(True)
+            sv=a.selectbox('시작',opts,index=opts.index(old.get('start','00:00')),key=f'{prefix}_s_{i}')
+            ev=b.selectbox('종료',eopts,index=eopts.index(old.get('end','06:00')),key=f'{prefix}_e_{i}')
+            scopes=['all','weekdays','weekends','dates']; labels={'all':'전체','weekdays':'주중','weekends':'주말','dates':'날짜 선택'}
+            scope=st.radio('적용 날짜',scopes,index=scopes.index(old.get('scope','all')),format_func=lambda x:labels[x],horizontal=True,key=f'{prefix}_scope_{i}')
+            chosen=st.multiselect('날짜',dates,default=[date.fromisoformat(x) for x in old.get('dates',[]) if x in {d.isoformat() for d in dates}],format_func=lambda d:f'{d:%m/%d} ("월화수목금토일"[d.weekday()])',key=f'{prefix}_dates_{i}') if scope=='dates' else []
+            selected.append({'start':sv,'end':ev,'scope':scope,'dates':[d.isoformat() for d in chosen]})
+            if st.button('삭제',key=f'{prefix}_del_{i}'):
+                st.session_state[count_key]=max(0,st.session_state[count_key]-1)
+                st.rerun()
+        if st.button('+',key=f'{prefix}_add',use_container_width=False):
+            st.session_state[count_key]+=1
+            st.rerun()
+    if st.button('저장',type='primary',key=f'{prefix}_save',use_container_width=True):
         if any(w['start']==w['end'] for w in selected): st.error('시작과 종료가 같은 시간대가 있습니다.'); return
         if any(w['scope']=='dates' and not w['dates'] for w in selected): st.error('날짜 선택을 사용한 시간대에는 최소 한 날짜를 골라 주세요.'); return
-        SUPABASE.table('rooms').update({'unavailable_windows':selected if enabled else []}).eq('id',room['id']).execute(); st.success('방 설정을 저장했습니다.'); st.rerun()
+        SUPABASE.table('rooms').update({'unavailable_windows':selected if enabled else []}).eq('id',room['id']).execute(); st.rerun()
+
 
 def show_my_rooms(user_id: str):
     rooms = db_rooms_for_user(user_id)
@@ -633,47 +648,39 @@ def show_active_room(user_id: str):
     if not room: return
     members=get_members(room['id']); me=next((m for m in members if m['user_id']==user_id),None)
     if not me: st.error('이 방의 멤버 정보를 찾지 못했습니다.'); return
-    windows=get_windows(room); start=date.fromisoformat(str(room['start_date'])); end=date.fromisoformat(str(room['end_date']))
-    title,actions=st.columns([4,1]); title.subheader(room['room_name']); title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}** · {start:%Y.%m.%d} – {end:%Y.%m.%d} · 멤버 {len(members)}명")
+    windows=get_windows(room)
+    title,actions=st.columns([5,1]); title.subheader(room['room_name']); title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}**")
     if actions.button('방 나가기',use_container_width=True):
         SUPABASE.table('room_members').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.session_state.pop('active_room_id',None); st.rerun()
-    st.info(f"방 코드 **{room['room_code']}**를 공유하세요.")
-    if 'week_anchor' not in st.session_state: st.session_state['week_anchor']=max(start,min(date.today(),end))
-    anchor=st.session_state['week_anchor']; anchor=max(start,min(anchor,end))
-    nav1,nav2,nav3=st.columns([1,1,1])
-    if nav1.button('← 이전 주',use_container_width=True,key=f'prev_{room["id"]}'):
-        st.session_state['week_anchor']=max(start,anchor-timedelta(days=7)); st.rerun()
-    if nav2.button('이번 주',use_container_width=True,key=f'today_{room["id"]}'):
-        st.session_state['week_anchor']=max(start,min(date.today(),end)); st.rerun()
-    if nav3.button('다음 주 →',use_container_width=True,key=f'next_{room["id"]}'):
-        st.session_state['week_anchor']=min(end,anchor+timedelta(days=7)); st.rerun()
-    week=week_dates(room,anchor)
-    if week: st.caption(f"{week[0]:%Y.%m.%d} – {week[-1]:%Y.%m.%d}")
     is_host=room['host_id']==user_id
     tabs=st.tabs(['내 일정 입력','합주 가능 시간','멤버별 일정']+(['방장 설정'] if is_host else []))
-    with tabs[0]: show_schedule_input(room,user_id,anchor,windows)
-    with tabs[1]: show_overview(room,members,anchor,windows)
-    with tabs[2]: show_member_schedule(room,members,anchor,windows)
+    with tabs[0]: show_schedule_input(room,user_id,windows)
+    with tabs[1]: show_overview(room,members,windows)
+    with tabs[2]: show_member_schedule(room,members,windows)
     if is_host:
         with tabs[3]: show_host_settings(room,windows)
+
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     require_login()
     global SUPABASE
     SUPABASE=get_supabase(); user_id=current_user_id()
-    top1,top2=st.columns([5,1]); top1.title(APP_TITLE); top1.caption(f"Google 계정: {st.user.email}")
+    top1,top2=st.columns([5,1]); top1.title(APP_TITLE)
     if top2.button('로그아웃',use_container_width=True):
         SUPABASE.auth.sign_out(); st.logout()
-    create_tab, rooms_tab=st.tabs(['방 만들기','참여한 방'])
-    with create_tab:
-        show_room_creation(user_id)
-    with rooms_tab:
-        st.subheader('참여한 방')
-        show_join_room()
-        st.divider()
+
+    if 'main_section' not in st.session_state:
+        st.session_state['main_section']='내 합주실'
+    section=st.radio('메뉴',['내 합주실','방 만들기','방 참여하기'],horizontal=True,key='main_section',label_visibility='collapsed')
+    st.markdown('''<style>div[role="radiogroup"]{gap:0!important;border-bottom:1px solid #d1d5db;margin-bottom:1rem}div[role="radiogroup"] label{padding:10px 18px!important;border-radius:0!important}div[role="radiogroup"] label:has(input:checked){border-bottom:2px solid #111827;font-weight:700}</style>''',unsafe_allow_html=True)
+    if section=='내 합주실':
         show_active_room(user_id)
-    st.caption('일정과 방 정보는 Supabase에 저장됩니다. 새로고침해도 Google 로그인과 참여 방을 다시 찾을 수 있습니다.')
+    elif section=='방 만들기':
+        show_room_creation(user_id)
+    else:
+        show_join_room()
+
 
 SUPABASE: Client
 
