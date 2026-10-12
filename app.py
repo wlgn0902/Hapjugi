@@ -395,10 +395,10 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
         rows.append(f"<tr>{''.join(cells)}</tr>")
     st.markdown("""
     <style>
-    .grid-wrap{overflow:auto;width:100%;border:1px solid #30363d;border-radius:10px;background:#0d1117}.grid{border-collapse:separate;border-spacing:0;width:100%;min-width:520px;table-layout:fixed;color:#e6edf3;background:#0d1117}
-    .grid th,.grid td{border-right:1px solid #30363d;border-bottom:1px solid #30363d;padding:0;text-align:center}.grid tr>*:last-child{border-right:0}.grid tbody tr:last-child>*{border-bottom:0}
-    .grid thead th{height:38px;background:#21262d;color:#e6edf3;position:sticky;top:0;z-index:2}.grid .time{width:78px;min-width:78px;text-align:right;padding-right:7px;background:#161b22;color:#c9d1d9;font-size:.72rem}
-    .grid .cell{height:16px}.grid .empty{background:#0d1117}.grid .blocked{background:#30363d}.grid .fully-available{background:#238636}.grid .maybe-available{background:#9e6a03}.grid .uncomfortable{background:#bc4c00}.grid .unavailable{background:#da3633}
+    .grid-wrap{overflow:auto;width:100%;border:1px solid var(--border-color,#d8dbe2);border-radius:10px;background:var(--background-color,#fff)}.grid{border-collapse:separate;border-spacing:0;width:100%;min-width:520px;table-layout:fixed;color:var(--text-color,#262730);background:var(--background-color,#fff)}
+    .grid th,.grid td{border-right:1px solid var(--border-color,#d8dbe2);border-bottom:1px solid var(--border-color,#d8dbe2);padding:0;text-align:center}.grid tr>*:last-child{border-right:0}.grid tbody tr:last-child>*{border-bottom:0}
+    .grid thead th{height:38px;background:var(--secondary-background-color,#f0f2f6);color:var(--text-color,#262730);position:sticky;top:0;z-index:2}.grid .time{width:78px;min-width:78px;text-align:right;padding-right:7px;background:var(--secondary-background-color,#f0f2f6);color:var(--text-color,#60646f);font-size:.72rem}
+    .grid .cell{height:16px}.grid .empty{background:var(--background-color,#fff)}.grid .blocked{background:var(--secondary-background-color,#dfe2e8)}.grid .fully-available{background:#238636}.grid .maybe-available{background:#9e6a03}.grid .uncomfortable{background:#bc4c00}.grid .unavailable{background:#da3633}
     .legend{display:flex;flex-wrap:wrap;gap:7px 14px;margin:4px 0 10px;font-size:.82rem}.legend-item{display:inline-flex;align-items:center;gap:5px}.legend-item i{display:inline-block;width:13px;height:13px;border:1px solid #484f58;border-radius:3px}.blocked-swatch{background:#30363d}
     @media(max-width:700px){.grid{min-width:480px}.grid .cell{height:15px}.grid .time{width:64px;min-width:64px;font-size:.65rem}.grid thead th{height:34px;font-size:.75rem}}
     </style>
@@ -447,30 +447,47 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
         and result.get("event_id")
         and result.get("event_id") != st.session_state.get(event_state_key)
     ):
-        # Remember the event before rerunning; otherwise Streamlit can return
-        # the same component value again and repeat the write/rerun indefinitely.
+        # A component event already caused this Streamlit run. Process all cells
+        # in batches instead of making one network request per cell or forcing
+        # an extra full-app rerun (both caused visible lag/flicker).
         st.session_state[event_state_key] = result["event_id"]
         cells = result.get("cells") or []
         status = result.get("status") or selected_status
+        rows_to_upsert = []
+        clear_by_date: dict[str, set[str]] = {}
         for cell in cells:
             d = date.fromisoformat(cell["date"])
-            # The browser component sends the slot as "HH:MM", not an integer.
-            # Convert it to minutes after midnight before writing to Supabase.
             time_text = str(cell["minute"])
             if ":" in time_text:
                 hour_text, minute_text = time_text.split(":", 1)
                 m = int(hour_text) * 60 + int(minute_text)
             else:
                 m = int(time_text)
-            if is_unavailable(minute_to_time(m), windows, d):
+            if not 0 <= m < 1440 or m % 15 != 0:
+                continue
+            slot = minute_to_time(m)
+            if is_unavailable(slot, windows, d):
                 continue
             if status == CLEAR_STATUS:
-                clear_slot(room["id"], user_id, d, m)
-            else:
-                upsert_slot(room["id"], user_id, d, m, status)
-        # The component-triggered run fetched statuses before processing this event.
-        # Run once more after the database writes so the grid receives fresh values.
-        st.rerun()
+                clear_by_date.setdefault(d.isoformat(), set()).add(slot)
+            elif status in STATUS_OPTIONS:
+                rows_to_upsert.append({
+                    "room_id": room["id"],
+                    "user_id": user_id,
+                    "date": d.isoformat(),
+                    "time": slot,
+                    "status": status,
+                })
+        if rows_to_upsert:
+            SUPABASE.table("availability").upsert(
+                rows_to_upsert, on_conflict="room_id,user_id,date,time"
+            ).execute()
+        for date_text, slots in clear_by_date.items():
+            SUPABASE.table("availability").delete().eq(
+                "room_id", room["id"]
+            ).eq("user_id", user_id).eq("date", date_text).in_(
+                "time", sorted(slots)
+            ).execute()
 
 
 def _window_editor(prefix: str, room_start: date, room_end: date, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -592,18 +609,29 @@ def show_schedule_input(room, user_id, windows):
     st.subheader("내 일정 입력")
     dates = all_room_dates(room)
     minutes = visible_minutes(windows)
-    selected_status = st.radio("입력할 상태", [*STATUS_OPTIONS, CLEAR_STATUS], horizontal=True, key=f"paint_status_{room['id']}")
+    # The status picker lives inside the custom grid component so changing
+    # colors does not trigger a slow full Streamlit rerun.
+    selected_status = st.session_state.get(f"paint_status_{room['id']}", STATUS_OPTIONS[0])
     rows = get_availability(room["id"], dates)
     statuses = {(str(r["date"]), str(r["time"])[:5]): r["status"] for r in rows if r["user_id"] == user_id}
-    b1,b2,b3=st.columns(3)
-    if b1.button("합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['id']}"):
-        mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
-        bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[0],mine); st.rerun()
-    if b2.button("합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['id']}"):
-        mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
-        bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[3],mine); st.rerun()
-    if b3.button("전체 지우기", use_container_width=True, key=f"bulk_clear_{room['id']}"):
-        SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.rerun()
+
+    with st.container(border=True):
+        st.markdown("**미선택 시간 일괄 설정**")
+        st.caption("이미 상태가 입력된 시간은 그대로 두고, 아직 선택하지 않은 시간에만 적용합니다.")
+        b1, b2 = st.columns(2)
+        if b1.button("미선택 시간에 대해 합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['id']}"):
+            mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
+            bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[0],mine); st.rerun()
+        if b2.button("미선택 시간에 대해 합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['id']}"):
+            mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
+            bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[3],mine); st.rerun()
+
+    with st.container(border=True):
+        st.markdown("**일정 초기화**")
+        st.caption("이 방에서 내가 입력한 일정을 모두 삭제합니다. 다른 멤버의 일정에는 영향을 주지 않습니다.")
+        if st.button("내 일정 전체 지우기", use_container_width=True, key=f"bulk_clear_{room['id']}"):
+            SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.rerun()
+
     render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}")
 
 
@@ -712,30 +740,22 @@ def show_active_room(user_id: str):
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    # Keep the page at full brightness while Streamlit reruns after edits.
-    # Streamlit dims the main block container while a script is running; override it.
+    # Keep Streamlit's running/stale state from dimming the app during component events.
     st.markdown("""<style>
-    div[data-testid="stAppViewBlockContainer"],
-    div[data-testid="stAppViewContainer"],
-    div[data-testid="stMain"],
-    div[data-testid="stMainBlockContainer"],
+    [data-stale],
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewBlockContainer"],
+    [data-testid="stMain"],
+    [data-testid="stMainBlockContainer"],
     section.main,
-    section.main > div,
-    .stApp [data-testid="stVerticalBlock"] {
+    section.main > div {
       opacity: 1 !important;
       filter: none !important;
     }
-    div[data-testid="stAppViewBlockContainer"][aria-busy="true"],
-    div[data-testid="stAppViewContainer"][aria-busy="true"],
-    div[data-testid="stMain"][aria-busy="true"],
-    div[data-testid="stMainBlockContainer"][aria-busy="true"] {
+    [data-stale] *,
+    [aria-busy="true"] {
       opacity: 1 !important;
       filter: none !important;
-    }
-    *, *::before, *::after {
-      animation-duration: 0s !important;
-      transition-duration: 0s !important;
-      scroll-behavior: auto !important;
     }
     </style>""", unsafe_allow_html=True)
     require_login()
