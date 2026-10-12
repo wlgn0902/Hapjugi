@@ -11,10 +11,10 @@ th,td{padding:0;border-right:1px solid #d1d5db;border-bottom:1px solid #d1d5db;t
 thead th{position:sticky;top:0;z-index:4;height:42px;background:#f8fafc;font-size:12px;font-weight:600;min-width:42px}
 th.time{position:sticky;left:0;z-index:5;width:76px;min-width:76px;background:#f8fafc;text-align:right;padding-right:7px;font-size:11px}
 tbody th.time{height:18px;font-weight:400;color:#4b5563}
-td.slot{width:42px;min-width:42px;height:18px;background:#fff;cursor:pointer;user-select:none;touch-action:none}
+td.slot{width:42px;min-width:42px;height:18px;background:#fff;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none}
 td.slot:hover{outline:2px solid #111827;outline-offset:-2px;position:relative;z-index:3}
 td.blocked{background:#374151!important;cursor:not-allowed}td.hidden{visibility:hidden;border:0!important;background:transparent!important;pointer-events:none;outline:0!important}
-td.fully-available{background:#16a34a}td.maybe-available{background:#facc15}td.uncomfortable{background:#f97316}td.unavailable{background:#ef4444}td.preview{outline:2px solid #111827;outline-offset:-2px;filter:brightness(.88)}
+td.fully-available{background:#16a34a}td.maybe-available{background:#facc15}td.uncomfortable{background:#f97316}td.unavailable{background:#ef4444}td.preview{outline:2px solid #111827;outline-offset:-2px}
 .err{padding:12px;color:#b91c1c;font-size:13px;white-space:pre-wrap}
 @media(max-width:700px){th.time{width:62px;min-width:62px}td.slot{width:38px;min-width:38px}thead th{height:38px;font-size:11px}}
 </style>
@@ -26,6 +26,7 @@ td.fully-available{background:#16a34a}td.maybe-available{background:#facc15}td.u
 'use strict';
 let args = null;
 let dragging = false;
+let dragPointerId = null;
 let selected = new Set();
 const COLORS = {'합주 완전 가능':'fully-available','합주 가능(애매)':'maybe-available','합주 가능(불편)':'uncomfortable','합주 완전 불가':'unavailable'};
 function post(type, extra={}) { window.parent.postMessage({isStreamlitMessage:true,type,...extra}, '*'); }
@@ -41,26 +42,28 @@ function render(){
  const corner=document.createElement('th');corner.className='time';corner.textContent='시간';head.appendChild(corner);
  const weekdays='월화수목금토일';
  const hiddenKeys=new Set(args.hidden||[]);
+ const hiddenRows=new Set(args.hidden_rows||[]);
  args.dates.forEach(d=>{const th=document.createElement('th');const dt=new Date(d+'T00:00:00');th.innerHTML=d.slice(5).replace('-','/')+'<br>'+weekdays[(dt.getDay()+6)%7];head.appendChild(th);});
  args.minutes.forEach(m=>{
-  const allDatesHidden=args.dates.length>0 && args.dates.every(d=>hiddenKeys.has(d+'|'+timeKey(m)));
-  if(allDatesHidden)return;
+  if(hiddenRows.has(timeKey(m)))return;
   const tr=document.createElement('tr');const time=document.createElement('th');time.className='time';time.textContent=m%60===0?minuteLabel(m):'';tr.appendChild(time);
   args.dates.forEach(d=>{
    const key=d+'|'+timeKey(m);const td=document.createElement('td');td.className='slot';td.dataset.key=key;
    const status=(args.statuses||{})[key]||'';if(COLORS[status])td.classList.add(COLORS[status]);
-   if((args.blocked||[]).includes(key))td.classList.add('blocked');if((args.hidden||[]).includes(key))td.classList.add('hidden');
+   if((args.blocked||[]).includes(key))td.classList.add('blocked');if(hiddenKeys.has(key))td.classList.add('hidden');
    if(args.editable&&!td.classList.contains('blocked')&&!td.classList.contains('hidden'))td.title=d+' '+timeKey(m)+' · '+(status||'미입력');
    tr.appendChild(td);
   });body.appendChild(tr);
  });
  setHeight();
 }
+function getCellAtPoint(x,y){const el=document.elementFromPoint(x,y);return el&&el.closest?el.closest('td.slot'):null;}
+function canPaint(td){return !!(td&&args&&args.editable&&!td.classList.contains('blocked')&&!td.classList.contains('hidden'));}
 function paintPreview(){document.querySelectorAll('td.preview').forEach(td=>td.classList.remove('preview'));selected.forEach(k=>{const td=document.querySelector('td[data-key="'+CSS.escape(k)+'"]');if(td)td.classList.add('preview');});}
-function finish(){if(!dragging)return;dragging=false;if(selected.size){const cells=[...selected].map(k=>{const [date,minute]=k.split('|');return {date,minute};});send({action:'paint',cells,status:args.selected_status});}selected.clear();paintPreview();}
-document.addEventListener('pointerdown',e=>{const td=e.target.closest('td.slot');if(!td||!args||!args.editable||td.classList.contains('blocked')||td.classList.contains('hidden'))return;e.preventDefault();dragging=true;selected=new Set([td.dataset.key]);paintPreview();});
-document.addEventListener('pointerover',e=>{if(!dragging)return;const td=e.target.closest('td.slot');if(td&&!td.classList.contains('blocked')&&!td.classList.contains('hidden')){selected.add(td.dataset.key);paintPreview();}});
-window.addEventListener('pointerup',finish);window.addEventListener('pointercancel',finish);
+function finish(e){if(!dragging)return;if(e&&dragPointerId!==null&&e.pointerId!==undefined&&e.pointerId!==dragPointerId)return;dragging=false;dragPointerId=null;if(selected.size){const cells=[...selected].map(k=>{const [date,minute]=k.split('|');return {date,minute};});send({action:'paint',cells,status:args.selected_status});}selected.clear();paintPreview();}
+document.addEventListener('pointerdown',e=>{if(e.button!==undefined&&e.button!==0)return;const td=e.target.closest&&e.target.closest('td.slot');if(!canPaint(td))return;e.preventDefault();dragging=true;dragPointerId=e.pointerId;selected=new Set([td.dataset.key]);paintPreview();try{td.setPointerCapture(e.pointerId);}catch(_){}},{passive:false});
+document.addEventListener('pointermove',e=>{if(!dragging||e.pointerId!==dragPointerId)return;const td=getCellAtPoint(e.clientX,e.clientY);if(canPaint(td)&&!selected.has(td.dataset.key)){selected.add(td.dataset.key);paintPreview();}},{passive:true});
+document.addEventListener('pointerup',finish);document.addEventListener('pointercancel',finish);window.addEventListener('blur',()=>finish());
 window.addEventListener('message',e=>{const data=e.data;if(!data||data.type!=='streamlit:render')return;args=data.args||data;try{render();}catch(err){showError(String(err));}});
 post('streamlit:componentReady',{apiVersion:1});
 setHeight();
