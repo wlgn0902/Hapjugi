@@ -23,11 +23,12 @@ STATUS_OPTIONS = [
     "합주 완전 불가",
 ]
 CLEAR_STATUS = "입력 지우기"
+# Light-mode-first palette; these same colors are used in both app themes.
 STATUS_COLORS = {
-    STATUS_OPTIONS[0]: "#16a34a",
-    STATUS_OPTIONS[1]: "#facc15",
-    STATUS_OPTIONS[2]: "#f97316",
-    STATUS_OPTIONS[3]: "#ef4444",
+    STATUS_OPTIONS[0]: "#b7e4c7",
+    STATUS_OPTIONS[1]: "#ffe69a",
+    STATUS_OPTIONS[2]: "#ffc078",
+    STATUS_OPTIONS[3]: "#ffadad",
 }
 STATUS_CLASSES = {
     STATUS_OPTIONS[0]: "fully-available",
@@ -398,13 +399,13 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
     .grid-wrap{overflow:auto;width:100%;border:1px solid var(--border-color,#d8dbe2);border-radius:10px;background:var(--background-color,#fff)}.grid{border-collapse:separate;border-spacing:0;width:100%;min-width:520px;table-layout:fixed;color:var(--text-color,#262730);background:var(--background-color,#fff)}
     .grid th,.grid td{border-right:1px solid var(--border-color,#d8dbe2);border-bottom:1px solid var(--border-color,#d8dbe2);padding:0;text-align:center}.grid tr>*:last-child{border-right:0}.grid tbody tr:last-child>*{border-bottom:0}
     .grid thead th{height:38px;background:var(--secondary-background-color,#f0f2f6);color:var(--text-color,#262730);position:sticky;top:0;z-index:2}.grid .time{width:78px;min-width:78px;text-align:right;padding-right:7px;background:var(--secondary-background-color,#f0f2f6);color:var(--text-color,#60646f);font-size:.72rem}
-    .grid .cell{height:16px}.grid .empty{background:var(--background-color,#fff)}.grid .blocked{background:var(--secondary-background-color,#dfe2e8)}.grid .fully-available{background:#238636}.grid .maybe-available{background:#9e6a03}.grid .uncomfortable{background:#bc4c00}.grid .unavailable{background:#da3633}
+    .grid .cell{height:16px}.grid .empty{background:var(--background-color,#fff)}.grid .blocked{background:var(--secondary-background-color,#dfe2e8)}.grid .fully-available{background:#b7e4c7}.grid .maybe-available{background:#ffe69a}.grid .uncomfortable{background:#ffc078}.grid .unavailable{background:#ffadad}
     .legend{display:flex;flex-wrap:wrap;gap:7px 14px;margin:4px 0 10px;font-size:.82rem}.legend-item{display:inline-flex;align-items:center;gap:5px}.legend-item i{display:inline-block;width:13px;height:13px;border:1px solid #484f58;border-radius:3px}.blocked-swatch{background:#30363d}
     @media(max-width:700px){.grid{min-width:480px}.grid .cell{height:15px}.grid .time{width:64px;min-width:64px;font-size:.65rem}.grid thead th{height:34px;font-size:.75rem}}
     </style>
     """ + f'<div class="grid-wrap"><table class="grid"><thead><tr><th class="time">시간</th>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
 
-def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule"):
+def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule", reset_token=0):
     payload_statuses = {f"{d.isoformat()}|{minute_to_time(m)}": statuses.get((d.isoformat(), minute_to_time(m)), "") for d in dates for m in minutes}
     blocked = {f"{d.isoformat()}|{minute_to_time(m)}" for d in dates for m in minutes if is_unavailable(minute_to_time(m), windows, d)}
     # Hide unavailable slots that touch the start/end of each date. Keep each
@@ -436,6 +437,7 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
         status_options=STATUS_OPTIONS,
         selected_status=selected_status,
         editable=editable,
+        reset_token=reset_token,
         key=key,
         default=None,
     )
@@ -617,22 +619,25 @@ def show_schedule_input(room, user_id, windows):
 
     with st.container(border=True):
         st.markdown("**미선택 시간 일괄 설정**")
-        st.caption("이미 상태가 입력된 시간은 그대로 두고, 아직 선택하지 않은 시간에만 적용합니다.")
         b1, b2 = st.columns(2)
-        if b1.button("미선택 시간에 대해 합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['id']}"):
+        if b1.button("합주 완전 가능", use_container_width=True, key=f"bulk_yes_{room['id']}"):
             mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
             bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[0],mine); st.rerun()
-        if b2.button("미선택 시간에 대해 합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['id']}"):
+        if b2.button("합주 완전 불가", use_container_width=True, key=f"bulk_no_{room['id']}"):
             mine={(str(r['date']),str(r['time'])[:5]) for r in rows if r['user_id']==user_id}
             bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[3],mine); st.rerun()
 
+    reset_token_key = f"schedule_reset_{room['id']}"
+    if reset_token_key not in st.session_state:
+        st.session_state[reset_token_key] = 0
     with st.container(border=True):
-        st.markdown("**일정 초기화**")
-        st.caption("이 방에서 내가 입력한 일정을 모두 삭제합니다. 다른 멤버의 일정에는 영향을 주지 않습니다.")
         if st.button("내 일정 전체 지우기", use_container_width=True, key=f"bulk_clear_{room['id']}"):
-            SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.rerun()
+            SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).execute()
+            # Tell the iframe to discard optimistic cells from the last stroke.
+            st.session_state[reset_token_key] += 1
+            st.rerun()
 
-    render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}")
+    render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}",reset_token=st.session_state[reset_token_key])
 
 
 def show_overview(room, members, windows):
