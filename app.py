@@ -643,19 +643,51 @@ def show_schedule_input(room, user_id, windows):
     render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}",reset_token=st.session_state[reset_token_key])
 
 
-def _blend_status_colors(values: list[str], include_unavailable: bool = True) -> str | None:
-    """Map the average ordered status to a fixed, legible color palette.
+def _hex_rgb(value: str) -> tuple[int, int, int]:
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
-    This is intentionally not an RGB average: each response has an ordinal
-    meaning, and the result is quantized to a small palette from green to red.
+
+def _rgb_hex(rgb: tuple[int, int, int]) -> str:
+    return "#" + "".join(f"{max(0, min(255, round(channel))):02X}" for channel in rgb)
+
+
+def _fixed_color_ramp(anchors: list[str], steps_per_interval: int = 30) -> list[str]:
+    """Build a fixed, quantized palette by interpolating between semantic anchors."""
+    rgb_anchors = [_hex_rgb(color) for color in anchors]
+    palette: list[str] = []
+    for segment in range(len(rgb_anchors) - 1):
+        left, right = rgb_anchors[segment], rgb_anchors[segment + 1]
+        for step in range(steps_per_interval):
+            t = step / steps_per_interval
+            palette.append(_rgb_hex(tuple(a + (b - a) * t for a, b in zip(left, right))))
+    palette.append(anchors[-1].upper())
+    return palette
+
+
+# Fixed palettes with 61 discrete colors: enough nuance without arbitrary RGB averaging.
+_AVAILABLE_RAMP = _fixed_color_ramp(["#00C853", "#FFD600", "#FF6D00"])
+_ALL_RAMP = _fixed_color_ramp(["#00C853", "#FFD600", "#FF6D00", "#F44336"])
+
+
+def _blend_status_colors(values: list[str], include_unavailable: bool = True) -> str | None:
+    """Return a color from a fixed green-yellow-orange(-red) ramp.
+
+    In the default filter, red/unavailable answers are excluded and the remaining
+    score range is 0..2. Thus green + yellow averages to a true midpoint between
+    green and yellow (lime), rather than incorrectly landing on yellow.
     """
-    rank = {STATUS_OPTIONS[0]: 0.0, STATUS_OPTIONS[1]: 1.0, STATUS_OPTIONS[2]: 2.0, STATUS_OPTIONS[3]: 3.0}
+    rank = {
+        STATUS_OPTIONS[0]: 0.0,
+        STATUS_OPTIONS[1]: 1.0,
+        STATUS_OPTIONS[2]: 2.0,
+        STATUS_OPTIONS[3]: 3.0,
+    }
     valid = [rank[v] for v in values if v in rank and (include_unavailable or v != STATUS_OPTIONS[3])]
     if not valid:
         return None
     score = sum(valid) / len(valid)
-    # A fixed seven-color ramp makes the result consistent and easier to read.
-    palette = ["#00C853", "#AEEA00", "#FFD600", "#FFAB00", "#FF6D00", "#FF3D00", "#F44336"]
+    palette = _ALL_RAMP if include_unavailable else _AVAILABLE_RAMP
     max_score = 3.0 if include_unavailable else 2.0
     index = round((score / max_score) * (len(palette) - 1))
     return palette[max(0, min(len(palette) - 1, index))]
@@ -722,7 +754,7 @@ def show_overview(room, members, windows):
         key=f"overview_{room['id']}", cell_colors=cell_colors,
         ideal_keys=ideal_keys, cell_details=cell_details,
     )
-    st.caption("파란 테두리로 둘러싸인 연속 구간은 모든 멤버가 ‘합주 완전 가능’을 선택한 시간입니다.")
+    st.caption("파란 테두리로 둘러싸인 칸은 모든 멤버가 ‘합주 완전 가능’을 선택한 시간입니다.")
 
 def show_member_schedule(room, members, windows):
     st.subheader("멤버별 일정")
@@ -787,10 +819,11 @@ def show_my_rooms(user_id: str):
 
 
 @st.dialog("이 방에 참여한 멤버")
-def show_member_list_dialog(room_id, members, current_user_id):
+def show_member_list_dialog(room_id, members, current_user_id, host_id):
     st.write(f"총 {len(members)}명")
     for member in members:
-        role_label = "👑 방장" if member.get("role") == "host" else "멤버"
+        # The rooms.host_id field is the source of truth; room_members.role may be stale.
+        role_label = "👑 방장" if str(member.get("user_id")) == str(host_id) else "멤버"
         suffix = " · 나" if member.get("user_id") == current_user_id else ""
         st.markdown(f"- **{member['name']}**{suffix} — {role_label}")
 
@@ -821,7 +854,7 @@ def show_active_room(user_id: str):
     title.subheader(room['room_name'])
     title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}**")
     if member_action.button(f"멤버 {len(members)}명", use_container_width=True, key=f"show_members_{room['id']}"):
-        show_member_list_dialog(room['id'], members, user_id)
+        show_member_list_dialog(room['id'], members, user_id, room.get("host_id"))
     if leave_action.button('방 나가기', use_container_width=True):
         SUPABASE.table('room_members').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.session_state.pop('active_room_id',None); st.rerun()
     is_host=room['host_id']==user_id
