@@ -43,15 +43,35 @@ def get_supabase() -> Client:
         return client
 
     try:
-        id_token = st.user.tokens["id"]
-        if id_token:
-            response = client.auth.sign_in_with_id_token(
-                {"provider": "google", "token": id_token}
+        # Google ID tokens may contain at_hash; Supabase also needs the matching access token.
+        tokens = st.user.tokens
+        id_token = tokens.get("id")
+        access_token = tokens.get("access")
+
+        if not id_token:
+            st.error(
+                "Google 로그인 토큰을 읽지 못했습니다. Streamlit Cloud의 Secrets에서 "
+                '[auth] 아래 expose_tokens = ["id", "access"] 설정을 확인한 뒤, '
+                "앱에서 로그아웃하고 다시 로그인해 주세요."
             )
-            if getattr(response, "session", None):
-                return client
+            st.stop()
+
+        credentials = {"provider": "google", "token": id_token}
+        if access_token:
+            credentials["access_token"] = access_token
+
+        response = client.auth.sign_in_with_id_token(credentials)
+        if getattr(response, "session", None):
+            return client
+
+        st.error("Supabase 로그인 세션을 만들지 못했습니다. 로그아웃한 뒤 다시 로그인해 주세요.")
+        st.stop()
     except Exception as exc:
-        st.error(f"Supabase 로그인 연결에 실패했습니다: {exc}")
+        st.error(
+            f"Supabase 로그인 연결에 실패했습니다: {exc}\n\n"
+            'Streamlit Cloud의 Secrets에서 [auth] 아래 expose_tokens = ["id", "access"] 설정을 확인하고, '
+            "저장 후 앱에서 로그아웃한 다음 Google 로그인을 다시 해 주세요."
+        )
         st.stop()
     return client
 
