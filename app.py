@@ -405,7 +405,7 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
     </style>
     """ + f'<div class="grid-wrap"><table class="grid"><thead><tr><th class="time">시간</th>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
 
-def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule", reset_token=0):
+def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule", reset_token=0, cell_colors=None, ideal_keys=None):
     payload_statuses = {f"{d.isoformat()}|{minute_to_time(m)}": statuses.get((d.isoformat(), minute_to_time(m)), "") for d in dates for m in minutes}
     blocked = {f"{d.isoformat()}|{minute_to_time(m)}" for d in dates for m in minutes if is_unavailable(minute_to_time(m), windows, d)}
     # Hide unavailable slots that touch the start/end of each date. Keep each
@@ -431,6 +431,8 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
         dates=[d.isoformat() for d in dates],
         minutes=minutes,
         statuses=payload_statuses,
+        cell_colors=cell_colors or {},
+        ideal_keys=ideal_keys or [],
         blocked=list(blocked),
         hidden=list(hidden),
         hidden_rows=hidden_rows,
@@ -640,27 +642,72 @@ def show_schedule_input(room, user_id, windows):
     render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}",reset_token=st.session_state[reset_token_key])
 
 
+def _blend_status_colors(values: list[str]) -> str | None:
+    """Blend member status colors by taking the arithmetic mean of RGB channels."""
+    if not values:
+        return None
+    colors = [STATUS_COLORS[v] for v in values if v in STATUS_COLORS]
+    if not colors:
+        return None
+    channels = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in colors]
+    avg = tuple(round(sum(rgb[i] for rgb in channels) / len(channels)) for i in range(3))
+    return "#" + "".join(f"{channel:02X}" for channel in avg)
+
+
 def show_overview(room, members, windows):
     st.subheader("합주 가능 시간")
-    dates=all_room_dates(room); minutes=visible_minutes(windows)
-    rows=get_availability(room['id'],dates)
-    lookup={(str(r['date']),str(r['user_id']),str(r['time'])[:5]):r['status'] for r in rows}
-    statuses={}; ideal=pending=unavailable=0
+    mode = st.segmented_control(
+        "표시 방식",
+        ["전체 합주 가능 시간", "모두"],
+        default="전체 합주 가능 시간",
+        key=f"overview_filter_{room['id']}",
+        label_visibility="collapsed",
+        width="stretch",
+    ) or "전체 합주 가능 시간"
+    dates = all_room_dates(room)
+    minutes = visible_minutes(windows)
+    rows = get_availability(room['id'], dates)
+    lookup = {(str(r['date']), str(r['user_id']), str(r['time'])[:5]): r['status'] for r in rows}
+    statuses = {}
+    cell_colors = {}
+    ideal_keys = []
+    ideal = pending = unavailable = 0
     for d in dates:
-        dk=d.isoformat()
+        dk = d.isoformat()
         for minute in minutes:
-            slot=minute_to_time(minute); key=(dk,slot)
-            if is_unavailable(slot,windows,d): unavailable+=1; continue
-            values=[lookup.get((dk,str(m['user_id']),slot)) for m in members]
-            received=[v for v in values if v in STATUS_OPTIONS]; missing=len(members)-len(received)
-            if missing: pending+=1
-            if received: statuses[key]=max(received,key=STATUS_OPTIONS.index)
-            if missing==0 and received and statuses[key]==STATUS_OPTIONS[0]: ideal+=1
-    c1,c2,c3=st.columns(3)
-    c1.metric('전원 합주 가능',f'{ideal*15//60}시간 {ideal*15%60}분')
-    c2.metric('응답 대기',f'{pending}칸')
-    c3.metric('합주 제외',f'{unavailable}칸')
-    render_schedule_component(room,"",dates,minutes,windows,statuses,"",editable=False,key=f"overview_{room['id']}")
+            slot = minute_to_time(minute)
+            key = (dk, slot)
+            component_key = f"{dk}|{slot}"
+            if is_unavailable(slot, windows, d):
+                unavailable += 1
+                continue
+            values = [lookup.get((dk, str(m['user_id']), slot)) for m in members]
+            received = [v for v in values if v in STATUS_OPTIONS]
+            missing = len(members) - len(received)
+            if missing:
+                pending += 1
+            has_unavailable = STATUS_OPTIONS[3] in received
+            # The default filter suppresses any time where one member marked
+            # "completely unavailable" using the theme's neutral blocked color.
+            if mode == "전체 합주 가능 시간" and has_unavailable:
+                statuses[key] = "__masked__"
+                continue
+            if received:
+                mixed = _blend_status_colors(received if mode == "모두" else [v for v in received if v != STATUS_OPTIONS[3]])
+                if mixed:
+                    cell_colors[component_key] = mixed
+                if all(v == STATUS_OPTIONS[0] for v in values) and not missing:
+                    ideal += 1
+                    ideal_keys.append(component_key)
+    c1, c2, c3 = st.columns(3)
+    c1.metric('전원 합주 가능', f'{ideal*15//60}시간 {ideal*15%60}분')
+    c2.metric('응답 대기', f'{pending}칸')
+    c3.metric('합주 제외', f'{unavailable}칸')
+    render_schedule_component(
+        room, "", dates, minutes, windows, statuses, "", editable=False,
+        key=f"overview_{room['id']}", cell_colors=cell_colors, ideal_keys=ideal_keys,
+    )
+    st.caption("흰색 테두리(라이트 모드에서는 어두운 테두리)는 모든 멤버가 ‘합주 완전 가능’을 선택한 시간입니다.")
 
 
 def show_member_schedule(room, members, windows):
@@ -725,14 +772,27 @@ def show_my_rooms(user_id: str):
     return next(r for r in rooms if r["id"] == selected)
 
 
+@st.dialog("이 방에 참여한 멤버")
+def show_member_list_dialog(members, current_user_id):
+    st.write(f"총 {len(members)}명")
+    for member in members:
+        role_label = "방장" if member.get("role") == "host" else "멤버"
+        suffix = " · 나" if member.get("user_id") == current_user_id else ""
+        st.markdown(f"- **{member['name']}**{suffix} — {role_label}")
+
+
 def show_active_room(user_id: str):
     room=show_my_rooms(user_id)
     if not room: return
     members=get_members(room['id']); me=next((m for m in members if m['user_id']==user_id),None)
     if not me: st.error('이 방의 멤버 정보를 찾지 못했습니다.'); return
     windows=get_windows(room)
-    title,actions=st.columns([5,1]); title.subheader(room['room_name']); title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}**")
-    if actions.button('방 나가기',use_container_width=True):
+    title, member_action, leave_action = st.columns([5, 1.5, 1])
+    title.subheader(room['room_name'])
+    title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}**")
+    if member_action.button(f"멤버 {len(members)}명", use_container_width=True, key=f"show_members_{room['id']}"):
+        show_member_list_dialog(members, user_id)
+    if leave_action.button('방 나가기', use_container_width=True):
         SUPABASE.table('room_members').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.session_state.pop('active_room_id',None); st.rerun()
     is_host=room['host_id']==user_id
     tabs=st.tabs(['내 일정 입력','합주 가능 시간','멤버별 일정']+(['방장 설정'] if is_host else []))
