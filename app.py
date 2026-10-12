@@ -451,7 +451,8 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
                 clear_slot(room["id"], user_id, d, m)
             else:
                 upsert_slot(room["id"], user_id, d, m, status)
-        st.rerun()
+        # A component value change already triggers a Streamlit rerun; do not
+        # request a second rerun, which causes an extra flash/fade.
 
 
 def _window_editor(prefix: str, room_start: date, room_end: date, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -693,6 +694,15 @@ def show_active_room(user_id: str):
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+    # Streamlit reruns the script after schedule edits. Disable fade/transition
+    # effects so the page remains visually steady while the data refreshes.
+    st.markdown("""<style>
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }
+    </style>""", unsafe_allow_html=True)
     require_login()
     global SUPABASE
     SUPABASE=get_supabase(); user_id=current_user_id()
