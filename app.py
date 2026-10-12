@@ -520,7 +520,7 @@ def show_room_creation(user_id: str):
         try:
             created=create_room(room_name,host_name,password.strip(),start,end,valid)
             st.session_state["active_room_id"]=created["id"]
-            st.session_state["main_section"]="내 합주실"
+            st.session_state["pending_main_section"]="내 합주실"
             st.success(f"방을 만들었습니다. 방 코드: **{created['room_code']}**")
             st.rerun()
         except Exception as exc:
@@ -549,7 +549,7 @@ def show_join_room():
             return
         joined = join_room(code, password.strip(), name)
         st.session_state["active_room_id"] = joined["id"]
-        st.session_state["main_section"] = "내 합주실"
+        st.session_state["pending_main_section"] = "내 합주실"
         st.success(f"'{room['room_name']}' 방에 참여했습니다.")
         st.rerun()
     except Exception:
@@ -690,9 +690,14 @@ def main():
     if top2.button('로그아웃',use_container_width=True):
         SUPABASE.auth.sign_out(); st.logout()
 
-    if 'main_section' not in st.session_state:
-        st.session_state['main_section']='내 합주실'
-    section=st.radio('메뉴',['내 합주실','방 만들기','방 참여하기'],horizontal=True,key='main_section',label_visibility='collapsed')
+    # Apply navigation requests before creating the radio widget; Streamlit
+    # does not allow changing a widget's own session-state key afterward.
+    if "main_section_radio" not in st.session_state:
+        st.session_state["main_section_radio"] = "내 합주실"
+    pending_section = st.session_state.pop("pending_main_section", None)
+    if pending_section in ["내 합주실", "방 만들기", "방 참여하기"]:
+        st.session_state["main_section_radio"] = pending_section
+    section=st.radio('메뉴',['내 합주실','방 만들기','방 참여하기'],horizontal=True,key='main_section_radio',label_visibility='collapsed')
     st.markdown('''<style>div[role="radiogroup"]{gap:0!important;border-bottom:1px solid #d1d5db;margin-bottom:1rem}div[role="radiogroup"] label{padding:10px 18px!important;border-radius:0!important}div[role="radiogroup"] label:has(input:checked){border-bottom:2px solid #111827;font-weight:700}</style>''',unsafe_allow_html=True)
     if section=='내 합주실':
         show_active_room(user_id)
