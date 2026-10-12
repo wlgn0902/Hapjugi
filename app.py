@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -11,7 +12,9 @@ from supabase import Client, create_client
 
 APP_TITLE = "합주기가 됩시다 합"
 APP_URL = "https://lets-be-hapjugi.streamlit.app/"
-SCHEDULE_COMPONENT = components.declare_component("schedule_grid", path="schedule_grid_component")
+SCHEDULE_COMPONENT = components.declare_component(
+    "schedule_grid", path=str(Path(__file__).parent / "schedule_grid_component")
+)
 
 STATUS_OPTIONS = [
     "합주 완전 가능",
