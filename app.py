@@ -23,6 +23,8 @@ STATUS_OPTIONS = [
     "합주 완전 불가",
 ]
 CLEAR_STATUS = "입력 지우기"
+DEFAULT_SESSIONS = ["보컬", "일렉 기타", "베이스", "키보드", "드럼"]
+ADD_SESSION_OPTION = "＋ 새 세션 추가"
 # Light-mode-first palette; these same colors are used in both app themes.
 STATUS_COLORS = {
     STATUS_OPTIONS[0]: "#00C853",  # vivid green
@@ -245,13 +247,85 @@ def get_room(room_id: str) -> dict[str, Any] | None:
 def get_members(room_id: str) -> list[dict[str, Any]]:
     return (
         SUPABASE.table("room_members")
-        .select("id,user_id,name,role,joined_at")
+        .select("id,user_id,name,role,joined_at,session,session_order")
         .eq("room_id", room_id)
         .order("joined_at")
         .execute()
         .data
         or []
     )
+
+
+def session_options(members: list[dict[str, Any]] | None = None) -> list[str]:
+    """Default session choices followed by any custom sessions already in this room."""
+    members = members or []
+    extras = sorted({str(m.get("session") or "").strip() for m in members} - {"", "미지정", *DEFAULT_SESSIONS})
+    return DEFAULT_SESSIONS + extras
+
+
+def assign_member_session(room_id: str, user_id: str, session_name: str) -> None:
+    session_name = session_name.strip() or "보컬"
+    members = get_members(room_id)
+    same_session = [m for m in members if str(m.get("session") or "미지정") == session_name and str(m.get("user_id")) != str(user_id)]
+    next_order = max([int(m.get("session_order") or 1) for m in same_session] or [0]) + 1
+    SUPABASE.table("room_members").update({"session": session_name, "session_order": next_order}).eq("room_id", room_id).eq("user_id", user_id).execute()
+
+
+def session_display_map(members: list[dict[str, Any]]) -> dict[str, str]:
+    """Assign visible 1-based labels in session order, with join time as tie-breaker."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for member in members:
+        name = str(member.get("session") or "미지정")
+        grouped.setdefault(name, []).append(member)
+    result: dict[str, str] = {}
+    for session_name, group in grouped.items():
+        group.sort(key=lambda m: (int(m.get("session_order") or 1), str(m.get("joined_at") or "")))
+        for index, member in enumerate(group, 1):
+            result[str(member.get("user_id"))] = f"{session_name} {index}" if len(group) > 1 else session_name
+    return result
+
+
+def reorder_session_members(room_id: str, members: list[dict[str, Any]], target_user_id: str, new_session: str, new_order: int) -> None:
+    """Persist a session choice and compact the order for both affected sessions."""
+    target = next((m for m in members if str(m.get("user_id")) == str(target_user_id)), None)
+    if not target:
+        raise RuntimeError("멤버 정보를 찾지 못했습니다.")
+    old_session = str(target.get("session") or "미지정")
+    new_session = new_session.strip() or "보컬"
+    old_group = [m for m in members if str(m.get("session") or "미지정") == old_session and str(m.get("user_id")) != str(target_user_id)]
+    new_group = [m for m in members if str(m.get("session") or "미지정") == new_session and str(m.get("user_id")) != str(target_user_id)]
+    if old_session == new_session:
+        ordered = sorted([m for m in members if str(m.get("session") or "미지정") == old_session], key=lambda m: (int(m.get("session_order") or 1), str(m.get("joined_at") or "")))
+        ordered = [m for m in ordered if str(m.get("user_id")) != str(target_user_id)]
+        new_order = max(1, min(int(new_order), len(ordered) + 1))
+        ordered.insert(new_order - 1, target)
+        for index, member in enumerate(ordered, 1):
+            SUPABASE.table("room_members").update({"session_order": index}).eq("room_id", room_id).eq("user_id", member["user_id"]).execute()
+        SUPABASE.table("room_members").update({"session": new_session, "session_order": new_order}).eq("room_id", room_id).eq("user_id", target_user_id).execute()
+        return
+    SUPABASE.table("room_members").update({"session": new_session, "session_order": max(1, min(int(new_order), len(new_group) + 1))}).eq("room_id", room_id).eq("user_id", target_user_id).execute()
+    # Compact the old group and keep the destination group ordered after the new member.
+    old_ordered = sorted(old_group, key=lambda m: (int(m.get("session_order") or 1), str(m.get("joined_at") or "")))
+    for index, member in enumerate(old_ordered, 1):
+        SUPABASE.table("room_members").update({"session_order": index}).eq("room_id", room_id).eq("user_id", member["user_id"]).execute()
+    refreshed = get_members(room_id)
+    destination = [m for m in refreshed if str(m.get("session") or "미지정") == new_session and str(m.get("user_id")) != str(target_user_id)]
+    destination.sort(key=lambda m: (int(m.get("session_order") or 1), str(m.get("joined_at") or "")))
+    destination.insert(max(0, min(int(new_order) - 1, len(destination))), target)
+    for index, member in enumerate(destination, 1):
+        SUPABASE.table("room_members").update({"session_order": index}).eq("room_id", room_id).eq("user_id", member["user_id"]).execute()
+
+
+def session_picker(prefix: str, members: list[dict[str, Any]] | None = None, default: str = "보컬") -> str:
+    options = session_options(members) + [ADD_SESSION_OPTION]
+    current_options = options[:-1]
+    if default not in current_options:
+        default = current_options[0]
+    choice = st.selectbox("세션", options, index=options.index(default), key=f"{prefix}_session_choice")
+    if choice == ADD_SESSION_OPTION:
+        custom = st.text_input("추가할 세션 이름", max_chars=30, placeholder="예: 피아노, 색소폰", key=f"{prefix}_session_custom").strip()
+        return custom
+    return choice
 
 
 def get_availability(room_id: str, dates: list[date]) -> list[dict[str, Any]]:
@@ -322,7 +396,7 @@ def bulk_set(
     if rows:
         SUPABASE.table("availability").upsert(rows, on_conflict="room_id,user_id,date,time").execute()
 
-def create_room(room_name: str, display_name: str, password: str, start: date, end: date, windows: list[dict[str, Any]]) -> dict[str, Any]:
+def create_room(room_name: str, display_name: str, password: str, start: date, end: date, windows: list[dict[str, Any]], session_name: str = "보컬") -> dict[str, Any]:
     code = make_room_code()
     password_hash_value = None
     if password:
@@ -340,6 +414,7 @@ def create_room(room_name: str, display_name: str, password: str, start: date, e
     if not room_id:
         raise RuntimeError("방 생성에 실패했습니다.")
     SUPABASE.table("rooms").update({"unavailable_windows": windows}).eq("id", room_id).execute()
+    assign_member_session(str(room_id), current_user_id(), session_name)
     room = get_room(str(room_id))
     if not room:
         raise RuntimeError("방 생성 후 방 정보를 불러오지 못했습니다.")
@@ -353,7 +428,7 @@ def lookup_room_by_code(code: str) -> dict[str, Any] | None:
     return result.data[0] if isinstance(result.data, list) else result.data
 
 
-def join_room(code: str, password: str, display_name: str) -> dict[str, Any]:
+def join_room(code: str, password: str, display_name: str, session_name: str = "보컬") -> dict[str, Any]:
     result = SUPABASE.rpc("join_room", {
         "p_room_code": code,
         "p_name": display_name,
@@ -362,6 +437,7 @@ def join_room(code: str, password: str, display_name: str) -> dict[str, Any]:
     room_id = result.data[0] if isinstance(result.data, list) else result.data
     if not room_id:
         raise RuntimeError("방 참여에 실패했습니다.")
+    assign_member_session(str(room_id), current_user_id(), session_name)
     room = get_room(str(room_id))
     if not room:
         raise RuntimeError("방 참여 후 방 정보를 불러오지 못했습니다.")
@@ -405,7 +481,7 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
     </style>
     """ + f'<div class="grid-wrap"><table class="grid"><thead><tr><th class="time">시간</th>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
 
-def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule", reset_token=0, cell_colors=None, ideal_keys=None, cell_details=None):
+def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule", reset_token=0, cell_colors=None, cell_details=None):
     payload_statuses = {f"{d.isoformat()}|{minute_to_time(m)}": statuses.get((d.isoformat(), minute_to_time(m)), "") for d in dates for m in minutes}
     blocked = {f"{d.isoformat()}|{minute_to_time(m)}" for d in dates for m in minutes if is_unavailable(minute_to_time(m), windows, d)}
     # Hide unavailable slots that touch the start/end of each date. Keep each
@@ -432,7 +508,6 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
         minutes=minutes,
         statuses=payload_statuses,
         cell_colors=cell_colors or {},
-        ideal_keys=ideal_keys or [],
         cell_details=cell_details or {},
         blocked=list(blocked),
         hidden=list(hidden),
@@ -552,6 +627,7 @@ def show_room_creation(user_id: str):
         st.session_state["create_window_count"] = 0
     room_name = st.text_input("방 이름", placeholder="예: 토요일 밴드 합주", key="create_room_name")
     host_name = st.text_input("내 이름", value=current_user_name(), key="create_host_name")
+    host_session = session_picker("create_host", [], "보컬")
     password = st.text_input("방 비밀번호 (선택)", type="password", help="비워 두면 비밀번호 없이 방 코드만으로 참여할 수 있습니다.", key="create_password")
     c1,c2=st.columns(2)
     start=c1.date_input("합주 시작일", date.today(), key="create_start")
@@ -565,6 +641,8 @@ def show_room_creation(user_id: str):
         room_name,host_name=room_name.strip(),host_name.strip()
         if not room_name or not host_name:
             st.error("방 이름과 내 이름을 입력해 주세요."); return
+        if not host_session:
+            st.error("세션을 선택하거나 새 세션 이름을 입력해 주세요."); return
         valid=[]
         for w in windows:
             if not w: continue
@@ -572,7 +650,7 @@ def show_room_creation(user_id: str):
             if w["scope"]=="dates" and not w["dates"]: st.error("날짜 선택을 사용한 시간대에는 최소 한 날짜를 골라 주세요."); return
             valid.append(w)
         try:
-            created=create_room(room_name,host_name,password.strip(),start,end,valid)
+            created=create_room(room_name,host_name,password.strip(),start,end,valid,host_session)
             st.session_state["active_room_id"]=created["id"]
             st.session_state["pending_main_section"]="내 합주실"
             st.success(f"방을 만들었습니다. 방 코드: **{created['room_code']}**")
@@ -582,32 +660,37 @@ def show_room_creation(user_id: str):
 
 def show_join_room():
     st.subheader("초대 코드로 방 참여하기")
-    with st.form("join_room_form"):
-        code = st.text_input("6자리 방 코드", max_chars=6, placeholder="예: 038517")
-        password = st.text_input("방 비밀번호", type="password", help="방장이 비밀번호를 설정하지 않았다면 비워 두세요.")
-        name = st.text_input("내 이름", value=current_user_name())
-        submitted = st.form_submit_button("방 참여", type="primary", use_container_width=True)
-    if not submitted:
-        return
-    code, name = code.strip(), name.strip()
-    if len(code) != 6 or not code.isdigit():
-        st.error("방 코드는 숫자 6자리로 입력해 주세요.")
-        return
-    if not name:
-        st.error("내 이름을 입력해 주세요.")
-        return
-    try:
-        room = lookup_room_by_code(code)
-        if not room:
-            st.error("해당 코드의 방을 찾을 수 없습니다.")
+    code = st.text_input("6자리 방 코드", max_chars=6, placeholder="예: 038517", key="join_room_code")
+    password = st.text_input("방 비밀번호", type="password", help="방장이 비밀번호를 설정하지 않았다면 비워 두세요.", key="join_room_password")
+    name = st.text_input("내 이름", value=current_user_name(), key="join_room_name")
+    found_room = lookup_room_by_code(code.strip()) if len(code.strip()) == 6 and code.strip().isdigit() else None
+    existing_members = get_members(str(found_room["id"])) if found_room else []
+    session_name = session_picker(f"join_{found_room['id']}" if found_room else "join", existing_members, "보컬")
+    if found_room:
+        st.caption(f"참여할 방: **{found_room['room_name']}**")
+    if st.button("방 참여", type="primary", use_container_width=True, key="join_room_submit"):
+        code, name = code.strip(), name.strip()
+        if len(code) != 6 or not code.isdigit():
+            st.error("방 코드는 숫자 6자리로 입력해 주세요.")
             return
-        joined = join_room(code, password.strip(), name)
-        st.session_state["active_room_id"] = joined["id"]
-        st.session_state["pending_main_section"] = "내 합주실"
-        st.success(f"'{room['room_name']}' 방에 참여했습니다.")
-        st.rerun()
-    except Exception:
-        st.error("방 코드 또는 비밀번호가 맞지 않습니다.")
+        if not name:
+            st.error("내 이름을 입력해 주세요.")
+            return
+        if not session_name:
+            st.error("세션을 선택하거나 새 세션 이름을 입력해 주세요.")
+            return
+        try:
+            room = lookup_room_by_code(code)
+            if not room:
+                st.error("해당 코드의 방을 찾을 수 없습니다.")
+                return
+            joined = join_room(code, password.strip(), name, session_name)
+            st.session_state["active_room_id"] = joined["id"]
+            st.session_state["pending_main_section"] = "내 합주실"
+            st.success(f"'{room['room_name']}' 방에 참여했습니다.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"방 코드 또는 비밀번호가 맞지 않거나 세션 정보를 저장하지 못했습니다: {exc}")
 
 
 def show_schedule_input(room, user_id, windows):
@@ -696,22 +779,54 @@ def _blend_status_colors(values: list[str], include_unavailable: bool = True) ->
 def show_overview(room, members, windows):
     st.subheader("합주 가능 시간")
     mode = st.segmented_control(
-        "표시 방식",
-        ["전체 합주 가능 시간", "모두"],
-        default="전체 합주 가능 시간",
-        key=f"overview_filter_{room['id']}",
-        label_visibility="collapsed",
-        width="stretch",
+        "표시 방식", ["전체 합주 가능 시간", "모두"],
+        default="전체 합주 가능 시간", key=f"overview_filter_{room['id']}",
+        label_visibility="collapsed", width="stretch",
     ) or "전체 합주 가능 시간"
+
+    # Session filter stays tucked into an icon popover rather than taking permanent space.
+    available_sessions = sorted({str(m.get("session") or "미지정") for m in members}, key=lambda x: (DEFAULT_SESSIONS.index(x) if x in DEFAULT_SESSIONS else 99, x))
+    filter_key = f"session_filter_initialized_{room['id']}"
+    if filter_key not in st.session_state:
+        st.session_state[filter_key] = True
+        st.session_state[f"session_filter_selected_{room['id']}"] = available_sessions[:]
+    selected_saved = st.session_state.get(f"session_filter_selected_{room['id']}", available_sessions[:])
+    known_key = f"session_filter_known_{room['id']}"
+    known_sessions = st.session_state.get(known_key, available_sessions[:])
+    with st.popover("⚙️", help="세션 필터"):
+        st.markdown("**표시할 세션 선택**")
+        if not available_sessions:
+            st.caption("아직 등록된 세션이 없습니다.")
+        selected_now = []
+        for sess in available_sessions:
+            checkbox_key = f"session_filter_{room['id']}_{sess}"
+            if checkbox_key not in st.session_state:
+                st.session_state[checkbox_key] = (sess in selected_saved) or (sess not in known_sessions)
+            if st.checkbox(sess, key=checkbox_key):
+                selected_now.append(sess)
+        c1, c2 = st.columns(2)
+        if c1.button("모두 선택", key=f"session_filter_all_{room['id']}", use_container_width=True):
+            for sess in available_sessions:
+                st.session_state[f"session_filter_{room['id']}_{sess}"] = True
+            st.rerun()
+        if c2.button("모두 해제", key=f"session_filter_none_{room['id']}", use_container_width=True):
+            for sess in available_sessions:
+                st.session_state[f"session_filter_{room['id']}_{sess}"] = False
+            st.rerun()
+        st.session_state[f"session_filter_selected_{room['id']}"] = selected_now
+        st.session_state[known_key] = available_sessions[:]
+    selected_sessions = st.session_state.get(f"session_filter_selected_{room['id']}", available_sessions[:])
+    filtered_members = [m for m in members if str(m.get("session") or "미지정") in selected_sessions]
+    if not selected_sessions:
+        st.info("세션 필터에서 한 개 이상의 세션을 선택해 주세요.")
+
     dates = all_room_dates(room)
     minutes = visible_minutes(windows)
     rows = get_availability(room['id'], dates)
     lookup = {(str(r['date']), str(r['user_id']), str(r['time'])[:5]): r['status'] for r in rows}
-    statuses = {}
-    cell_colors = {}
-    cell_details = {}
-    ideal_keys = []
-    ideal = pending = unavailable = 0
+    display_map = session_display_map(filtered_members)
+    statuses, cell_colors, cell_details = {}, {}, {}
+    possible_slots = pending_cells = 0
     for d in dates:
         dk = d.isoformat()
         for minute in minutes:
@@ -719,49 +834,55 @@ def show_overview(room, members, windows):
             key = (dk, slot)
             component_key = f"{dk}|{slot}"
             if is_unavailable(slot, windows, d):
-                unavailable += 1
                 continue
-            values = [lookup.get((dk, str(m['user_id']), slot)) for m in members]
+            values = [lookup.get((dk, str(m['user_id']), slot)) for m in filtered_members]
             received = [v for v in values if v in STATUS_OPTIONS]
-            missing = len(members) - len(received)
-            if missing:
-                pending += 1
-            cell_details[component_key] = [
-                {"name": str(member.get("name") or "이름 없음"), "status": value if value in STATUS_OPTIONS else ""}
-                for member, value in zip(members, values)
-            ]
+            missing = len(filtered_members) - len(received)
+            pending_cells += missing
             has_unavailable = STATUS_OPTIONS[3] in received
-            # Default view hides any time that at least one member marked unavailable.
+            all_possible = bool(filtered_members) and missing == 0 and not has_unavailable
+            if all_possible:
+                possible_slots += 1
             if mode == "전체 합주 가능 시간" and has_unavailable:
                 statuses[key] = "__masked__"
-                continue
-            mixed = _blend_status_colors(
-                received,
-                include_unavailable=(mode == "모두"),
-            )
-            if mixed:
-                cell_colors[component_key] = mixed
-            if all(v == STATUS_OPTIONS[0] for v in values) and not missing:
-                ideal += 1
-                ideal_keys.append(component_key)
+            elif selected_sessions:
+                mixed = _blend_status_colors(received, include_unavailable=(mode == "모두"))
+                if mixed:
+                    cell_colors[component_key] = mixed
+            details = []
+            for member, value in zip(filtered_members, values):
+                session_label = display_map.get(str(member.get("user_id")), str(member.get("session") or "미지정"))
+                details.append({
+                    "name": str(member.get("name") or "이름 없음"),
+                    "session_label": session_label,
+                    "status": value if value in STATUS_OPTIONS else "",
+                })
+            cell_details[component_key] = details
+
+    total_minutes = possible_slots * 15
+    days_count = max(1, len(dates))
+    avg_minutes = round(total_minutes / days_count)
     c1, c2, c3 = st.columns(3)
-    c1.metric('전원 합주 가능', f'{ideal*15//60}시간 {ideal*15%60}분')
-    c2.metric('응답 대기', f'{pending}칸')
-    excluded_minutes = unavailable * 15
-    c3.metric('합주 제외 시간', f'{excluded_minutes//60}시간 {excluded_minutes%60}분')
+    c1.metric("합주 가능 총시간", f"{total_minutes//60}시간 {total_minutes%60}분")
+    c2.metric("일별 평균 가능 시간", f"{avg_minutes//60}시간 {avg_minutes%60}분")
+    c3.metric("미입력", f"{pending_cells}칸")
     render_schedule_component(
         room, "", dates, minutes, windows, statuses, "", editable=False,
         key=f"overview_{room['id']}", cell_colors=cell_colors,
-        ideal_keys=ideal_keys, cell_details=cell_details,
+        cell_details=cell_details,
     )
-    st.caption("파란 테두리로 둘러싸인 칸은 모든 멤버가 ‘합주 완전 가능’을 선택한 시간입니다.")
 
 def show_member_schedule(room, members, windows):
     st.subheader("멤버별 일정")
-    names=[m['name'] for m in members]
-    if not names: return
-    name=st.selectbox("일정을 확인할 멤버",names,key=f"member_choice_{room['id']}")
-    member=next(m for m in members if m['name']==name)
+    if not members: return
+    display_map = session_display_map(members)
+    user_ids = [str(m["user_id"]) for m in members]
+    chosen_id = st.selectbox(
+        "일정을 확인할 멤버", user_ids,
+        format_func=lambda uid: f"{next((m['name'] for m in members if str(m['user_id']) == uid), '이름 없음')} · {display_map.get(uid, '미지정')}",
+        key=f"member_choice_{room['id']}",
+    )
+    member=next(m for m in members if str(m['user_id'])==str(chosen_id))
     dates=all_room_dates(room); minutes=visible_minutes(windows)
     rows=get_availability(room['id'],dates)
     statuses={(str(r['date']),str(r['time'])[:5]):r['status'] for r in rows if r['user_id']==member['user_id']}
@@ -821,28 +942,63 @@ def show_my_rooms(user_id: str):
 @st.dialog("이 방에 참여한 멤버")
 def show_member_list_dialog(room_id, members, current_user_id, host_id):
     st.write(f"총 {len(members)}명")
+    display_map = session_display_map(members)
     for member in members:
-        # The rooms.host_id field is the source of truth; room_members.role may be stale.
-        role_label = "👑 방장" if str(member.get("user_id")) == str(host_id) else "멤버"
-        suffix = " · 나" if member.get("user_id") == current_user_id else ""
-        st.markdown(f"- **{member['name']}**{suffix} — {role_label}")
+        is_host = str(member.get("user_id")) == str(host_id)
+        role_label = "👑 방장" if is_host else "멤버"
+        suffix = " · 나" if str(member.get("user_id")) == str(current_user_id) else ""
+        session_label = display_map.get(str(member.get("user_id")), str(member.get("session") or "미지정"))
+        st.markdown(f"- **{member['name']}**{suffix} — {role_label} · `{session_label}`")
 
-    me = next((member for member in members if member.get("user_id") == current_user_id), None)
+    me = next((member for member in members if str(member.get("user_id")) == str(current_user_id)), None)
     if me:
         st.divider()
-        with st.form(f"edit_member_info_{room_id}"):
-            new_name = st.text_input("이름", value=str(me.get("name") or ""), max_chars=40)
-            if st.form_submit_button("정보 수정", use_container_width=True):
-                cleaned = new_name.strip()
-                if not cleaned:
-                    st.error("이름을 한 글자 이상 입력해 주세요.")
-                else:
-                    try:
-                        SUPABASE.table("room_members").update({"name": cleaned}).eq("room_id", room_id).eq("user_id", current_user_id).execute()
-                        st.success("이름을 수정했어요.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"이름을 수정하지 못했습니다: {exc}")
+        current_session = str(me.get("session") or "미지정")
+        options = session_options(members)
+        if current_session not in options:
+            options.append(current_session)
+        new_name = st.text_input("이름", value=str(me.get("name") or ""), max_chars=40, key=f"edit_name_{room_id}")
+        session_choice = st.selectbox("세션", options + [ADD_SESSION_OPTION], index=options.index(current_session) if current_session in options else 0, key=f"edit_session_{room_id}")
+        new_session = st.text_input("새 세션 이름", max_chars=30, placeholder="예: 피아노, 색소폰", key=f"edit_custom_session_{room_id}") if session_choice == ADD_SESSION_OPTION else session_choice
+        same = [m for m in members if str(m.get("session") or "미지정") == str(new_session) and str(m.get("user_id")) != str(current_user_id)]
+        max_order = len(same) + 1
+        old_order = int(me.get("session_order") or 1)
+        order_options = list(range(1, max_order + 1))
+        default_order = min(old_order if str(new_session) == current_session else max_order, max_order)
+        order_key = f"edit_session_order_{room_id}"
+        if st.session_state.get(order_key) not in order_options:
+            st.session_state[order_key] = default_order
+        new_order = st.selectbox("같은 세션 내 순서", order_options, index=order_options.index(st.session_state[order_key]), format_func=lambda n: f"{n}번", key=order_key)
+        if st.button("정보 수정", use_container_width=True, key=f"save_member_info_{room_id}"):
+            cleaned = new_name.strip()
+            if not cleaned:
+                st.error("이름을 한 글자 이상 입력해 주세요.")
+            elif not str(new_session).strip():
+                st.error("세션을 선택하거나 새 세션 이름을 입력해 주세요.")
+            else:
+                try:
+                    SUPABASE.table("room_members").update({"name": cleaned}).eq("room_id", room_id).eq("user_id", current_user_id).execute()
+                    reorder_session_members(room_id, members, current_user_id, str(new_session), int(new_order))
+                    st.success("이름과 세션 정보를 수정했어요.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"정보를 수정하지 못했습니다: {exc}")
+
+    if str(current_user_id) == str(host_id):
+        others = [m for m in members if str(m.get("user_id")) != str(host_id)]
+        st.divider()
+        st.markdown("**방장 양도**")
+        if not others:
+            st.caption("방장 권한을 넘길 다른 멤버가 없습니다.")
+        else:
+            target = st.selectbox("새 방장", others, format_func=lambda m: f"{m.get('name', '이름 없음')} · {display_map.get(str(m.get('user_id')), m.get('session', '미지정'))}", key=f"transfer_target_{room_id}")
+            if st.button("방장 권한 양도", type="primary", use_container_width=True, key=f"transfer_host_{room_id}"):
+                try:
+                    SUPABASE.rpc("transfer_room_host", {"p_room_id": room_id, "p_new_host_id": target["user_id"]}).execute()
+                    st.success(f"{target.get('name', '선택한 멤버')} 님에게 방장 권한을 양도했어요.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"방장 권한을 양도하지 못했습니다. SQL 마이그레이션 적용 여부를 확인해 주세요. ({exc})")
 
 def show_active_room(user_id: str):
     room=show_my_rooms(user_id)
@@ -852,12 +1008,12 @@ def show_active_room(user_id: str):
     windows=get_windows(room)
     title, member_action, leave_action = st.columns([5, 1.5, 1])
     title.subheader(room['room_name'])
-    title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}**")
+    title.caption(f"방 코드 **{room['room_code']}** · 내 이름 **{me['name']}** · 세션 **{session_display_map(members).get(str(user_id), me.get('session', '미지정'))}**")
     if member_action.button(f"멤버 {len(members)}명", use_container_width=True, key=f"show_members_{room['id']}"):
         show_member_list_dialog(room['id'], members, user_id, room.get("host_id"))
     if leave_action.button('방 나가기', use_container_width=True):
         SUPABASE.table('room_members').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.session_state.pop('active_room_id',None); st.rerun()
-    is_host=room['host_id']==user_id
+    is_host=str(room['host_id'])==str(user_id)
     tabs=st.tabs(['내 일정 입력','합주 가능 시간','멤버별 일정']+(['방장 설정'] if is_host else []))
     with tabs[0]: show_schedule_input(room,user_id,windows)
     with tabs[1]: show_overview(room,members,windows)
