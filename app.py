@@ -25,10 +25,10 @@ STATUS_OPTIONS = [
 CLEAR_STATUS = "입력 지우기"
 # Light-mode-first palette; these same colors are used in both app themes.
 STATUS_COLORS = {
-    STATUS_OPTIONS[0]: "#b7e4c7",
-    STATUS_OPTIONS[1]: "#ffe69a",
-    STATUS_OPTIONS[2]: "#ffc078",
-    STATUS_OPTIONS[3]: "#ffadad",
+    STATUS_OPTIONS[0]: "#00C853",  # vivid green
+    STATUS_OPTIONS[1]: "#FFD600",  # vivid yellow
+    STATUS_OPTIONS[2]: "#FF6D00",  # vivid orange
+    STATUS_OPTIONS[3]: "#F44336",  # vivid red
 }
 STATUS_CLASSES = {
     STATUS_OPTIONS[0]: "fully-available",
@@ -399,7 +399,7 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
     .grid-wrap{overflow:auto;width:100%;border:1px solid var(--border-color,#d8dbe2);border-radius:10px;background:var(--background-color,#fff)}.grid{border-collapse:separate;border-spacing:0;width:100%;min-width:520px;table-layout:fixed;color:var(--text-color,#262730);background:var(--background-color,#fff)}
     .grid th,.grid td{border-right:1px solid var(--border-color,#d8dbe2);border-bottom:1px solid var(--border-color,#d8dbe2);padding:0;text-align:center}.grid tr>*:last-child{border-right:0}.grid tbody tr:last-child>*{border-bottom:0}
     .grid thead th{height:38px;background:var(--secondary-background-color,#f0f2f6);color:var(--text-color,#262730);position:sticky;top:0;z-index:2}.grid .time{width:78px;min-width:78px;text-align:right;padding-right:7px;background:var(--secondary-background-color,#f0f2f6);color:var(--text-color,#60646f);font-size:.72rem}
-    .grid .cell{height:16px}.grid .empty{background:var(--background-color,#fff)}.grid .blocked{background:var(--secondary-background-color,#dfe2e8)}.grid .fully-available{background:#b7e4c7}.grid .maybe-available{background:#ffe69a}.grid .uncomfortable{background:#ffc078}.grid .unavailable{background:#ffadad}
+    .grid .cell{height:16px}.grid .empty{background:var(--background-color,#fff)}.grid .blocked{background:var(--secondary-background-color,#dfe2e8)}.grid .fully-available{background:#00C853}.grid .maybe-available{background:#FFD600}.grid .uncomfortable{background:#FF6D00}.grid .unavailable{background:#F44336}
     .legend{display:flex;flex-wrap:wrap;gap:7px 14px;margin:4px 0 10px;font-size:.82rem}.legend-item{display:inline-flex;align-items:center;gap:5px}.legend-item i{display:inline-block;width:13px;height:13px;border:1px solid #484f58;border-radius:3px}.blocked-swatch{background:#30363d}
     @media(max-width:700px){.grid{min-width:480px}.grid .cell{height:15px}.grid .time{width:64px;min-width:64px;font-size:.65rem}.grid thead th{height:34px;font-size:.75rem}}
     </style>
@@ -762,6 +762,19 @@ def main():
       opacity: 1 !important;
       filter: none !important;
     }
+    /* Hide Streamlit's heading permalink icons; they are not needed in this app. */
+    [data-testid="stHeaderActionElements"],
+    a[data-testid="stHeaderActionElements"],
+    [data-testid="stMarkdownContainer"] h1 a,
+    [data-testid="stMarkdownContainer"] h2 a,
+    [data-testid="stMarkdownContainer"] h3 a {
+      display: none !important;
+      visibility: hidden !important;
+    }
+    /* Navigation should look like three connected tabs, not radio controls. */
+    div[data-testid="stSegmentedControl"] { width: 100%; margin-bottom: 1rem; }
+    div[data-testid="stSegmentedControl"] > div { width: 100%; }
+    div[data-testid="stSegmentedControl"] button { flex: 1 1 0; justify-content: center; font-weight: 600; }
     </style>""", unsafe_allow_html=True)
     require_login()
     global SUPABASE
@@ -777,8 +790,9 @@ def main():
     pending_section = st.session_state.pop("pending_main_section", None)
     if pending_section in ["내 합주실", "방 만들기", "방 참여하기"]:
         st.session_state["main_section_radio"] = pending_section
-    section=st.radio('메뉴',['내 합주실','방 만들기','방 참여하기'],horizontal=True,key='main_section_radio',label_visibility='collapsed')
-    st.markdown('''<style>div[role="radiogroup"]{gap:0!important;border-bottom:1px solid #d1d5db;margin-bottom:1rem}div[role="radiogroup"] label{padding:10px 18px!important;border-radius:0!important}div[role="radiogroup"] label:has(input:checked){border-bottom:2px solid #111827;font-weight:700}</style>''',unsafe_allow_html=True)
+    section=st.segmented_control('메뉴',['내 합주실','방 만들기','방 참여하기'],key='main_section_radio',label_visibility='collapsed')
+    if section is None:
+        section = '내 합주실'
     if section=='내 합주실':
         show_active_room(user_id)
     elif section=='방 만들기':
