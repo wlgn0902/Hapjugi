@@ -407,22 +407,32 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
 def render_schedule_component(room, user_id, dates, minutes, windows, statuses, selected_status, editable=True, key="schedule"):
     payload_statuses = {f"{d.isoformat()}|{minute_to_time(m)}": statuses.get((d.isoformat(), minute_to_time(m)), "") for d in dates for m in minutes}
     blocked = {f"{d.isoformat()}|{minute_to_time(m)}" for d in dates for m in minutes if is_unavailable(minute_to_time(m), windows, d)}
+    # Hide unavailable slots that touch the start/end of each date. Keep each
+    # date's columns aligned, but remove a whole time row when every date hides it.
     hidden = set()
+    visible_by_date = {}
     for d in dates:
         visible = compact_visible_minutes_for_date(windows, d)
+        visible_by_date[d.isoformat()] = set(visible)
         if visible:
-            lo, hi = min(visible), max(visible)
+            first_visible, last_visible = min(visible), max(visible)
             for m in minutes:
-                if m < lo or m > hi:
+                if m < first_visible or m > last_visible:
                     hidden.add(f"{d.isoformat()}|{minute_to_time(m)}")
         else:
             hidden.update(f"{d.isoformat()}|{minute_to_time(m)}" for m in minutes)
+    hidden_rows = [
+        minute_to_time(m)
+        for m in minutes
+        if dates and all(f"{d.isoformat()}|{minute_to_time(m)}" in hidden for d in dates)
+    ]
     result = SCHEDULE_COMPONENT(
         dates=[d.isoformat() for d in dates],
         minutes=minutes,
         statuses=payload_statuses,
         blocked=list(blocked),
         hidden=list(hidden),
+        hidden_rows=hidden_rows,
         status_options=STATUS_OPTIONS,
         selected_status=selected_status,
         editable=editable,
