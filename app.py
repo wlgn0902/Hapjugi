@@ -454,7 +454,14 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
         status = result.get("status") or selected_status
         for cell in cells:
             d = date.fromisoformat(cell["date"])
-            m = int(cell["minute"])
+            # The browser component sends the slot as "HH:MM", not an integer.
+            # Convert it to minutes after midnight before writing to Supabase.
+            time_text = str(cell["minute"])
+            if ":" in time_text:
+                hour_text, minute_text = time_text.split(":", 1)
+                m = int(hour_text) * 60 + int(minute_text)
+            else:
+                m = int(time_text)
             if is_unavailable(minute_to_time(m), windows, d):
                 continue
             if status == CLEAR_STATUS:
@@ -710,13 +717,18 @@ def main():
     st.markdown("""<style>
     div[data-testid="stAppViewBlockContainer"],
     div[data-testid="stAppViewContainer"],
+    div[data-testid="stMain"],
+    div[data-testid="stMainBlockContainer"],
+    section.main,
     section.main > div,
     .stApp [data-testid="stVerticalBlock"] {
       opacity: 1 !important;
       filter: none !important;
     }
     div[data-testid="stAppViewBlockContainer"][aria-busy="true"],
-    div[data-testid="stAppViewContainer"][aria-busy="true"] {
+    div[data-testid="stAppViewContainer"][aria-busy="true"],
+    div[data-testid="stMain"][aria-busy="true"],
+    div[data-testid="stMainBlockContainer"][aria-busy="true"] {
       opacity: 1 !important;
       filter: none !important;
     }
