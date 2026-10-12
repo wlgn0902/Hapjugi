@@ -575,7 +575,6 @@ def show_schedule_input(room, user_id, windows):
         bulk_set(room['id'],user_id,dates,minutes,windows,STATUS_OPTIONS[3],mine); st.rerun()
     if b3.button("전체 지우기", use_container_width=True, key=f"bulk_clear_{room['id']}"):
         SUPABASE.table('availability').delete().eq('room_id',room['id']).eq('user_id',user_id).execute(); st.rerun()
-    show_status_legend()
     render_schedule_component(room,user_id,dates,minutes,windows,statuses,selected_status,editable=True,key=f"editable_{room['id']}")
 
 
@@ -599,7 +598,6 @@ def show_overview(room, members, windows):
     c1.metric('전원 합주 가능',f'{ideal*15//60}시간 {ideal*15%60}분')
     c2.metric('응답 대기',f'{pending}칸')
     c3.metric('합주 제외',f'{unavailable}칸')
-    show_status_legend()
     render_schedule_component(room,"",dates,minutes,windows,statuses,"",editable=False,key=f"overview_{room['id']}")
 
 
@@ -612,7 +610,6 @@ def show_member_schedule(room, members, windows):
     dates=all_room_dates(room); minutes=visible_minutes(windows)
     rows=get_availability(room['id'],dates)
     statuses={(str(r['date']),str(r['time'])[:5]):r['status'] for r in rows if r['user_id']==member['user_id']}
-    show_status_legend()
     render_schedule_component(room,"",dates,minutes,windows,statuses,"",editable=False,key=f"member_{room['id']}_{member['user_id']}")
 
 
