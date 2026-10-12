@@ -4,17 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-*{box-sizing:border-box}html,body{margin:0;padding:0;width:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#fff}
-.wrap{width:100%;overflow-x:auto;overflow-y:visible;border:1px solid #d1d5db;border-radius:8px;max-height:none}
+*{box-sizing:border-box}html,body{margin:0;padding:0;width:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e6edf3;background:#0d1117;color-scheme:dark}
+.wrap{width:100%;overflow-x:auto;overflow-y:visible;border:1px solid #30363d;border-radius:8px;background:#0d1117;max-height:none}
 table{border-collapse:separate;border-spacing:0;table-layout:fixed;min-width:max-content;width:max-content}
-th,td{padding:0;border-right:1px solid #d1d5db;border-bottom:1px solid #d1d5db;text-align:center}
-thead th{position:sticky;top:0;z-index:4;height:42px;background:#f8fafc;font-size:12px;font-weight:600;min-width:42px}
-th.time{position:sticky;left:0;z-index:5;width:76px;min-width:76px;background:#f8fafc;text-align:right;padding-right:7px;font-size:11px}
-tbody th.time{height:18px;font-weight:400;color:#4b5563}
-td.slot{width:42px;min-width:42px;height:18px;background:#fff;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none}
+th,td{padding:0;border-right:1px solid #30363d;border-bottom:1px solid #30363d;text-align:center}
+thead th{position:sticky;top:0;z-index:4;height:42px;background:#21262d;color:#e6edf3;font-size:12px;font-weight:600;min-width:42px}
+th.time{position:sticky;left:0;z-index:5;width:76px;min-width:76px;background:#161b22;color:#c9d1d9;text-align:right;padding-right:7px;font-size:11px}
+tbody th.time{height:18px;font-weight:400;color:#8b949e}
+td.slot{width:42px;min-width:42px;height:18px;background:#0d1117;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none}
 td.slot:hover{outline:2px solid #111827;outline-offset:-2px;position:relative;z-index:3}
-td.blocked{background:#374151!important;cursor:not-allowed}td.hidden{visibility:hidden;border:0!important;background:transparent!important;pointer-events:none;outline:0!important}
-td.fully-available{background:#16a34a}td.maybe-available{background:#facc15}td.uncomfortable{background:#f97316}td.unavailable{background:#ef4444}td.preview{outline:2px solid #111827;outline-offset:-2px}
+td.blocked{background:#30363d!important;cursor:not-allowed}td.hidden{visibility:hidden;border:0!important;background:transparent!important;pointer-events:none;outline:0!important}
+td.fully-available{background:#238636}td.maybe-available{background:#9e6a03}td.uncomfortable{background:#bc4c00}td.unavailable{background:#da3633}td.preview{outline:2px solid #e6edf3;outline-offset:-2px}
 .err{padding:12px;color:#b91c1c;font-size:13px;white-space:pre-wrap}
 @media(max-width:700px){th.time{width:62px;min-width:62px}td.slot{width:38px;min-width:38px}thead th{height:38px;font-size:11px}}
 </style>
@@ -28,10 +28,11 @@ let args = null;
 let dragging = false;
 let dragPointerId = null;
 let selected = new Set();
+let dragStatus = null;
 const COLORS = {'합주 완전 가능':'fully-available','합주 가능(애매)':'maybe-available','합주 가능(불편)':'uncomfortable','합주 완전 불가':'unavailable'};
 function post(type, extra={}) { window.parent.postMessage({isStreamlitMessage:true,type,...extra}, '*'); }
 function setHeight(){ requestAnimationFrame(()=>{const table=document.querySelector('#wrap table');const height=table?Math.ceil(table.getBoundingClientRect().height)+4:100;post('streamlit:setFrameHeight',{height:Math.max(100,height)});}); }
-function send(value){post('streamlit:setComponentValue',{value,dataType:'json'});}
+function send(value){value.event_id=(Date.now().toString(36)+'-'+Math.random().toString(36).slice(2));post('streamlit:setComponentValue',{value,dataType:'json'});}
 function minuteLabel(m){let h=Math.floor(m/60);if(h===0)return '오전 12시';if(h<12)return '오전 '+h+'시';if(h===12)return '오후 12시';return '오후 '+(h-12)+'시';}
 function timeKey(m){return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');}
 function showError(msg){document.getElementById('error').hidden=false;document.getElementById('error').textContent='시간표를 불러오지 못했습니다.\n'+msg;document.getElementById('wrap').hidden=true;setHeight();}
@@ -60,8 +61,8 @@ function render(){
 function getCellAtPoint(x,y){const el=document.elementFromPoint(x,y);return el&&el.closest?el.closest('td.slot'):null;}
 function canPaint(td){return !!(td&&args&&args.editable&&!td.classList.contains('blocked')&&!td.classList.contains('hidden'));}
 function paintPreview(){document.querySelectorAll('td.preview').forEach(td=>td.classList.remove('preview'));selected.forEach(k=>{const td=document.querySelector('td[data-key="'+CSS.escape(k)+'"]');if(td)td.classList.add('preview');});}
-function finish(e){if(!dragging)return;if(e&&dragPointerId!==null&&e.pointerId!==undefined&&e.pointerId!==dragPointerId)return;dragging=false;dragPointerId=null;if(selected.size){const cells=[...selected].map(k=>{const [date,minute]=k.split('|');return {date,minute};});send({action:'paint',cells,status:args.selected_status});}selected.clear();paintPreview();}
-document.addEventListener('pointerdown',e=>{if(e.button!==undefined&&e.button!==0)return;const td=e.target.closest&&e.target.closest('td.slot');if(!canPaint(td))return;e.preventDefault();dragging=true;dragPointerId=e.pointerId;selected=new Set([td.dataset.key]);paintPreview();try{td.setPointerCapture(e.pointerId);}catch(_){}},{passive:false});
+function finish(e){if(!dragging)return;if(e&&dragPointerId!==null&&e.pointerId!==undefined&&e.pointerId!==dragPointerId)return;dragging=false;dragPointerId=null;if(selected.size){const cells=[...selected].map(k=>{const [date,minute]=k.split('|');return {date,minute};});send({action:'paint',cells,status:dragStatus||args.selected_status});}selected.clear();dragStatus=null;paintPreview();}
+document.addEventListener('pointerdown',e=>{if(e.button!==undefined&&e.button!==0)return;const td=e.target.closest&&e.target.closest('td.slot');if(!canPaint(td))return;e.preventDefault();dragging=true;dragPointerId=e.pointerId;selected=new Set([td.dataset.key]);dragStatus=args.selected_status;paintPreview();try{td.setPointerCapture(e.pointerId);}catch(_){}},{passive:false});
 document.addEventListener('pointermove',e=>{if(!dragging||e.pointerId!==dragPointerId)return;const td=getCellAtPoint(e.clientX,e.clientY);if(canPaint(td)&&!selected.has(td.dataset.key)){selected.add(td.dataset.key);paintPreview();}},{passive:true});
 document.addEventListener('pointerup',finish);document.addEventListener('pointercancel',finish);window.addEventListener('blur',()=>finish());
 window.addEventListener('message',e=>{const data=e.data;if(!data||data.type!=='streamlit:render')return;args=data.args||data;try{render();}catch(err){showError(String(err));}});
