@@ -395,11 +395,11 @@ def render_readonly_grid(dates, minutes, windows, statuses, titles=None) -> None
         rows.append(f"<tr>{''.join(cells)}</tr>")
     st.markdown("""
     <style>
-    .grid-wrap{overflow:auto;width:100%;border:1px solid #d1d5db;border-radius:10px}.grid{border-collapse:separate;border-spacing:0;width:100%;min-width:520px;table-layout:fixed}
-    .grid th,.grid td{border-right:1px solid #d1d5db;border-bottom:1px solid #d1d5db;padding:0;text-align:center}.grid tr>*:last-child{border-right:0}.grid tbody tr:last-child>*{border-bottom:0}
-    .grid thead th{height:38px;background:#f8fafc;position:sticky;top:0;z-index:2}.grid .time{width:78px;min-width:78px;text-align:right;padding-right:7px;background:#f8fafc;color:#374151;font-size:.72rem}
-    .grid .cell{height:16px}.grid .empty{background:#fff}.grid .blocked{background:#374151}.grid .fully-available{background:#16a34a}.grid .maybe-available{background:#facc15}.grid .uncomfortable{background:#f97316}.grid .unavailable{background:#ef4444}
-    .legend{display:flex;flex-wrap:wrap;gap:7px 14px;margin:4px 0 10px;font-size:.82rem}.legend-item{display:inline-flex;align-items:center;gap:5px}.legend-item i{display:inline-block;width:13px;height:13px;border:1px solid #6b7280;border-radius:3px}.blocked-swatch{background:#374151}
+    .grid-wrap{overflow:auto;width:100%;border:1px solid #30363d;border-radius:10px;background:#0d1117}.grid{border-collapse:separate;border-spacing:0;width:100%;min-width:520px;table-layout:fixed;color:#e6edf3;background:#0d1117}
+    .grid th,.grid td{border-right:1px solid #30363d;border-bottom:1px solid #30363d;padding:0;text-align:center}.grid tr>*:last-child{border-right:0}.grid tbody tr:last-child>*{border-bottom:0}
+    .grid thead th{height:38px;background:#21262d;color:#e6edf3;position:sticky;top:0;z-index:2}.grid .time{width:78px;min-width:78px;text-align:right;padding-right:7px;background:#161b22;color:#c9d1d9;font-size:.72rem}
+    .grid .cell{height:16px}.grid .empty{background:#0d1117}.grid .blocked{background:#30363d}.grid .fully-available{background:#238636}.grid .maybe-available{background:#9e6a03}.grid .uncomfortable{background:#bc4c00}.grid .unavailable{background:#da3633}
+    .legend{display:flex;flex-wrap:wrap;gap:7px 14px;margin:4px 0 10px;font-size:.82rem}.legend-item{display:inline-flex;align-items:center;gap:5px}.legend-item i{display:inline-block;width:13px;height:13px;border:1px solid #484f58;border-radius:3px}.blocked-swatch{background:#30363d}
     @media(max-width:700px){.grid{min-width:480px}.grid .cell{height:15px}.grid .time{width:64px;min-width:64px;font-size:.65rem}.grid thead th{height:34px;font-size:.75rem}}
     </style>
     """ + f'<div class="grid-wrap"><table class="grid"><thead><tr><th class="time">시간</th>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>', unsafe_allow_html=True)
@@ -439,7 +439,17 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
         key=key,
         default=None,
     )
-    if editable and result and result.get("action") == "paint":
+    event_state_key = f"_last_schedule_event_{key}"
+    if (
+        editable
+        and result
+        and result.get("action") == "paint"
+        and result.get("event_id")
+        and result.get("event_id") != st.session_state.get(event_state_key)
+    ):
+        # Remember the event before rerunning; otherwise Streamlit can return
+        # the same component value again and repeat the write/rerun indefinitely.
+        st.session_state[event_state_key] = result["event_id"]
         cells = result.get("cells") or []
         status = result.get("status") or selected_status
         for cell in cells:
@@ -451,8 +461,9 @@ def render_schedule_component(room, user_id, dates, minutes, windows, statuses, 
                 clear_slot(room["id"], user_id, d, m)
             else:
                 upsert_slot(room["id"], user_id, d, m, status)
-        # A component value change already triggers a Streamlit rerun; do not
-        # request a second rerun, which causes an extra flash/fade.
+        # The component-triggered run fetched statuses before processing this event.
+        # Run once more after the database writes so the grid receives fresh values.
+        st.rerun()
 
 
 def _window_editor(prefix: str, room_start: date, room_end: date, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -694,12 +705,24 @@ def show_active_room(user_id: str):
 
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    # Streamlit reruns the script after schedule edits. Disable fade/transition
-    # effects so the page remains visually steady while the data refreshes.
+    # Keep the page at full brightness while Streamlit reruns after edits.
+    # Streamlit dims the main block container while a script is running; override it.
     st.markdown("""<style>
+    div[data-testid="stAppViewBlockContainer"],
+    div[data-testid="stAppViewContainer"],
+    section.main > div,
+    .stApp [data-testid="stVerticalBlock"] {
+      opacity: 1 !important;
+      filter: none !important;
+    }
+    div[data-testid="stAppViewBlockContainer"][aria-busy="true"],
+    div[data-testid="stAppViewContainer"][aria-busy="true"] {
+      opacity: 1 !important;
+      filter: none !important;
+    }
     *, *::before, *::after {
-      animation: none !important;
-      transition: none !important;
+      animation-duration: 0s !important;
+      transition-duration: 0s !important;
       scroll-behavior: auto !important;
     }
     </style>""", unsafe_allow_html=True)
