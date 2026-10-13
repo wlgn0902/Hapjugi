@@ -10,7 +10,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from supabase import Client, create_client
 
-APP_TITLE = "합주기가 됩시다 합"
+APP_TITLE = "합주기가 됩시다 합(베타)"
 APP_URL = "https://lets-be-hapjugi.streamlit.app/"
 SCHEDULE_COMPONENT = components.declare_component(
     "schedule_grid", path=str(Path(__file__).parent / "schedule_grid_component")
@@ -323,7 +323,7 @@ def session_picker(prefix: str, members: list[dict[str, Any]] | None = None, def
         default = current_options[0]
     choice = st.selectbox("세션", options, index=options.index(default), key=f"{prefix}_session_choice")
     if choice == ADD_SESSION_OPTION:
-        custom = st.text_input("추가할 세션 이름", max_chars=30, placeholder="예: 피아노, 색소폰", key=f"{prefix}_session_custom").strip()
+        custom = st.text_input("추가할 세션 이름", max_chars=30, placeholder="예: 통기타, 바이올린", key=f"{prefix}_session_custom").strip()
         return custom
     return choice
 
@@ -625,7 +625,7 @@ def show_room_creation(user_id: str):
     st.subheader("새 합주 방 만들기")
     if "create_window_count" not in st.session_state:
         st.session_state["create_window_count"] = 0
-    room_name = st.text_input("방 이름", placeholder="예: 토요일 밴드 합주", key="create_room_name")
+    room_name = st.text_input("방 이름", placeholder="예: 경희대학교 한국어학과 밴드 동아리 ‘가락’ 합주", key="create_room_name")
     host_name = st.text_input("내 이름", value=current_user_name(), key="create_host_name")
     host_session = session_picker("create_host", [], "보컬")
     password = st.text_input("방 비밀번호 (선택)", type="password", help="비워 두면 비밀번호 없이 방 코드만으로 참여할 수 있습니다.", key="create_password")
@@ -660,7 +660,7 @@ def show_room_creation(user_id: str):
 
 def show_join_room():
     st.subheader("초대 코드로 방 참여하기")
-    code = st.text_input("6자리 방 코드", max_chars=6, placeholder="예: 038517", key="join_room_code")
+    code = st.text_input("6자리 방 코드", max_chars=6, placeholder="예: 123456", key="join_room_code")
     password = st.text_input("방 비밀번호", type="password", help="방장이 비밀번호를 설정하지 않았다면 비워 두세요.", key="join_room_password")
     name = st.text_input("내 이름", value=current_user_name(), key="join_room_name")
     found_room = lookup_room_by_code(code.strip()) if len(code.strip()) == 6 and code.strip().isdigit() else None
@@ -864,7 +864,7 @@ def show_overview(room, members, windows):
     avg_minutes = round(total_minutes / days_count)
     c1, c2, c3 = st.columns(3)
     c1.metric("합주 가능 총시간", f"{total_minutes//60}시간 {total_minutes%60}분")
-    c2.metric("일별 평균 가능 시간", f"{avg_minutes//60}시간 {avg_minutes%60}분")
+    c2.metric("일별 평균 합주 가능 시간", f"{avg_minutes//60}시간 {avg_minutes%60}분")
     c3.metric("미입력", f"{pending_cells}칸")
     render_schedule_component(
         room, "", dates, minutes, windows, statuses, "", editable=False,
@@ -959,7 +959,7 @@ def show_member_list_dialog(room_id, members, current_user_id, host_id):
             options.append(current_session)
         new_name = st.text_input("이름", value=str(me.get("name") or ""), max_chars=40, key=f"edit_name_{room_id}")
         session_choice = st.selectbox("세션", options + [ADD_SESSION_OPTION], index=options.index(current_session) if current_session in options else 0, key=f"edit_session_{room_id}")
-        new_session = st.text_input("새 세션 이름", max_chars=30, placeholder="예: 피아노, 색소폰", key=f"edit_custom_session_{room_id}") if session_choice == ADD_SESSION_OPTION else session_choice
+        new_session = st.text_input("새 세션 이름", max_chars=30, placeholder="예: 통기타, 바이올린", key=f"edit_custom_session_{room_id}") if session_choice == ADD_SESSION_OPTION else session_choice
         same = [m for m in members if str(m.get("session") or "미지정") == str(new_session) and str(m.get("user_id")) != str(current_user_id)]
         max_order = len(same) + 1
         old_order = int(me.get("session_order") or 1)
